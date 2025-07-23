@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Badge Identification Service</title>
+    <style>
+        #preview, #processed-preview {
+            max-width: 300px;
+            max-height: 300px;
+            margin: 10px 0; /* Add vertical spacing to prevent overlap */
+            display: inline-block; /* Allow images to display side by side or independently */
+            vertical-align: top; /* Align to the top */
+        }
+        #preview img, #processed-preview img {
+            width: 100%; /* Ensure images fit the container */
+            height: auto; /* Maintain aspect ratio */
+        }
+        #result p {
+            margin: 5px 0;
+        }
+        .preview-container {
+            margin: 10px 0; /* Container spacing */
+        }
+    </style>
+</head>
+<body>
+    <h1>Upload Badge Image for Identification</h1>
+    <form id="uploadForm">
+        <input type="file" id="image" accept="image/*" required>
+        <button type="button" id="preprocessBtn">Preprocess</button>
+        <button type="submit">Start Identification</button>
+    </form>
+    <div class="preview-container">
+        <div id="preview"></div>
+        <div id="processed-preview"></div>
+    </div>
+    <div id="result"></div>
+    <script>
+        const imageInput = document.getElementById('image');
+        const preview = document.getElementById('preview');
+        const processedPreview = document.getElementById('processed-preview');
+        const resultDiv = document.getElementById('result');
+        const preprocessBtn = document.getElementById('preprocessBtn');
+
+        // Preview the original image
+        imageInput.addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    preview.innerHTML = `<img src="${e.target.result}" alt="Original Preview">`;
+                };
+                reader.readAsDataURL(file);
+            } else {
+                preview.innerHTML = '';
+            }
+            processedPreview.innerHTML = '';  // Clear processed preview on new file
+        });
+
+        // Handle preprocess button click
+        preprocessBtn.addEventListener('click', async () => {
+            if (!imageInput.files[0]) {
+                alert('Please select an image first');
+                return;
+            }
+            const formData = new FormData();
+            formData.append('image', imageInput.files[0]);
+            try {
+                const response = await fetch('/preprocess-image', { method: 'POST', body: formData });
+                if (!response.ok) throw new Error('Preprocessing error: ' + response.statusText);
+                const data = await response.json();
+                processedPreview.innerHTML = `<img src="${data.processed_image}" alt="Processed Preview"><p>Processed circular cropped grayscale image (256x256, badge only)</p>`;
+            } catch (error) {
+                processedPreview.innerHTML = `<p style="color:red;">${error.message}</p>`;
+            }
+        });
+
+        // Handle form submission for identification
+        document.getElementById('uploadForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            if (!imageInput.files[0]) {
+                alert('Please select an image first');
+                return;
+            }
+            const formData = new FormData();
+            formData.append('image', imageInput.files[0]);
+            try {
+                const response = await fetch('/identify-badge', { method: 'POST', body: formData });
+                if (!response.ok) throw new Error('Identification error: ' + response.statusText);
+                const data = await response.json();
+                let output = `
+                    <p>Origin Work: ${data.source_work}</p>
+                    <p>Character: ${data.character}</p>
+                    <p>How to Purchase: ${data.purchase_method}</p>
+                    <p>Official Suggested Price: ${data.suggested_price}</p>
+                    <p>Suggested Auction Description: ${data.auction_description}</p>
+                `;
+                resultDiv.innerHTML = output;
+            } catch (error) {
+                resultDiv.innerHTML = `<p style="color:red;">${error.message}</p>`;
+            }
+        });
+    </script>
+</body>
+</html>
