@@ -7,19 +7,19 @@
         #preview, #processed-preview {
             max-width: 300px;
             max-height: 300px;
-            margin: 10px 0; /* Add vertical spacing to prevent overlap */
-            display: inline-block; /* Allow images to display side by side or independently */
-            vertical-align: top; /* Align to the top */
+            margin: 10px 0;
+            display: inline-block;
+            vertical-align: top;
         }
         #preview img, #processed-preview img {
-            width: 100%; /* Ensure images fit the container */
-            height: auto; /* Maintain aspect ratio */
+            width: 100%;
+            height: auto;
         }
         #result p {
             margin: 5px 0;
         }
         .preview-container {
-            margin: 10px 0; /* Container spacing */
+            margin: 10px 0;
         }
     </style>
 </head>
@@ -35,6 +35,7 @@
         <div id="processed-preview"></div>
     </div>
     <div id="result"></div>
+
     <script>
         const imageInput = document.getElementById('image');
         const preview = document.getElementById('preview');
@@ -42,7 +43,6 @@
         const resultDiv = document.getElementById('result');
         const preprocessBtn = document.getElementById('preprocessBtn');
 
-        // Preview the original image
         imageInput.addEventListener('change', function(e) {
             const file = e.target.files[0];
             if (file) {
@@ -54,10 +54,10 @@
             } else {
                 preview.innerHTML = '';
             }
-            processedPreview.innerHTML = '';  // Clear processed preview on new file
+            processedPreview.innerHTML = '';
+            resultDiv.innerHTML = '';
         });
 
-        // Handle preprocess button click
         preprocessBtn.addEventListener('click', async () => {
             if (!imageInput.files[0]) {
                 alert('Please select an image first');
@@ -69,13 +69,15 @@
                 const response = await fetch('/preprocess-image', { method: 'POST', body: formData });
                 if (!response.ok) throw new Error('Preprocessing error: ' + response.statusText);
                 const data = await response.json();
-                processedPreview.innerHTML = `<img src="${data.processed_image}" alt="Processed Preview"><p>Processed circular cropped grayscale image (256x256, badge only)</p>`;
+                processedPreview.innerHTML = `
+                    <img src="${data.processed_image}" alt="Processed Preview">
+                    <p><strong>Image Hash:</strong> ${data.image_hash}</p>
+                `;
             } catch (error) {
                 processedPreview.innerHTML = `<p style="color:red;">${error.message}</p>`;
             }
         });
 
-        // Handle form submission for identification
         document.getElementById('uploadForm').addEventListener('submit', async (e) => {
             e.preventDefault();
             if (!imageInput.files[0]) {
@@ -86,16 +88,22 @@
             formData.append('image', imageInput.files[0]);
             try {
                 const response = await fetch('/identify-badge', { method: 'POST', body: formData });
-                if (!response.ok) throw new Error('Identification error: ' + response.statusText);
                 const data = await response.json();
-                let output = `
-                    <p>Origin Work: ${data.source_work}</p>
-                    <p>Character: ${data.character}</p>
-                    <p>How to Purchase: ${data.purchase_method}</p>
-                    <p>Official Suggested Price: ${data.suggested_price}</p>
-                    <p>Suggested Auction Description: ${data.auction_description}</p>
+                if (!response.ok) throw new Error(data.error || 'Identification failed');
+
+                const matchInfo = data.matched
+                    ? '<span style="color:green;">✅ Found in DB</span>'
+                    : '<span style="color:red;">❌ Not Found in DB → Inserted as Placeholder</span>';
+
+                resultDiv.innerHTML = `
+                    <p><strong>Match Status:</strong> ${matchInfo}</p>
+                    <p><strong>Image Hash:</strong> ${data.image_hash}</p>
+                    <p><strong>Origin Work:</strong> ${data.source_work}</p>
+                    <p><strong>Character:</strong> ${data.character}</p>
+                    <p><strong>How to Purchase:</strong> ${data.purchase_method}</p>
+                    <p><strong>Suggested Price:</strong> ${data.suggested_price}</p>
+                    <p><strong>Auction Description:</strong> ${data.auction_description}</p>
                 `;
-                resultDiv.innerHTML = output;
             } catch (error) {
                 resultDiv.innerHTML = `<p style="color:red;">${error.message}</p>`;
             }
