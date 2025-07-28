@@ -2,6 +2,6 @@ flask==3.0.3
 numpy==1.26.4
 opencv-python==4.10.0.84
 Pillow==10.4.0
-imagehash==4.3.2
 requests==2.32.3
 scipy==1.11.2
+python-dotenv==1.0.1
