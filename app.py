@@ -78,6 +78,7 @@ COLOR_SCORE_DIST_THRESHOLD_1 = float(os.environ.get("COLOR_SCORE_DIST_THRESHOLD_
 COLOR_SCORE_CORR_THRESHOLD_1 = float(os.environ.get("COLOR_SCORE_CORR_THRESHOLD_1", 0.75))
 COLOR_SCORE_DIST_THRESHOLD_2 = float(os.environ.get("COLOR_SCORE_DIST_THRESHOLD_2", 30))
 COLOR_SCORE_CORR_THRESHOLD_2 = float(os.environ.get("COLOR_SCORE_CORR_THRESHOLD_2", 0.92))
+GROK_API_TIMEOUT = int(os.environ.get("GROK_API_TIMEOUT", 15))
 
 # ------------------------------------------------------------------
 # Image hashing & helpers
@@ -225,7 +226,7 @@ def call_grok_api(image_bytes):
     headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
     try:
         logger.debug("POST %s, payload size=%s bytes", GROK_API_URL, len(json.dumps(payload)))
-        response = requests.post(GROK_API_URL, json=payload, headers=headers, timeout=15)
+        response = requests.post(GROK_API_URL, json=payload, headers=headers, timeout=GROK_API_TIMEOUT)
         response.raise_for_status()
         result = response.json()
         logger.info("Grok API response: %s", result)

@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
     <title>バッジ識別サービス</title>
     <style>
+        /* Reset & Flat Base */
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: 'Helvetica Neue', Arial, sans-serif; background: #f2f2f2; color: #333; }
         h1 { text-align: center; font-size: 1.5rem; margin: 20px 0; }
@@ -82,7 +83,7 @@
     <h1>バッジ識別サービス</h1>
     <div class="container">
         <form id="uploadForm">
-            <input type="file" id="image" accept="image/*" required>
+            <input type="file" id="image" accept="image/*,.heic,.heif" required>
             <button type="submit" id="identifyBtn">識別開始</button>
         </form>
         <div class="preview-container">
@@ -94,7 +95,39 @@
     <div class="spinner-overlay" id="spinnerOverlay">
         <div class="spinner"></div>
     </div>
+
+    <!-- heic2any  -->
+    <script src="https://cdn.jsdelivr.net/npm/heic2any/dist/heic2any.min.js"></script>
+
     <script>
+        // --- HEIC/HEIF auto convert to PNG (iOS photo fix) ---
+        async function autoConvertImageIfHeic(file) {
+            const isHeic = (
+                file.type === "image/heic" ||
+                file.type === "image/heif" ||
+                file.name.toLowerCase().endsWith(".heic") ||
+                file.name.toLowerCase().endsWith(".heif")
+            );
+
+            if (!isHeic) return file;
+
+            try {
+                // 透過 heic2any 轉換為 PNG Blob
+                let converted = await heic2any({ blob: file, toType: "image/png" });
+                // heic2any 可能回傳 Blob 或 Blob 陣列，統一取第一筆
+                if (Array.isArray(converted)) converted = converted[0];
+                const pngFile = new File(
+                    [converted],
+                    file.name.replace(/\.(heic|heif)$/i, ".png"),
+                    { type: "image/png" }
+                );
+                return pngFile;
+            } catch (err) {
+                console.error("HEIC convert failed.", err);
+                throw new Error("HEIC convert failed.");
+            }
+        }
+
         const imageInput = document.getElementById('image');
         const preview = document.getElementById('preview');
         const processedPreview = document.getElementById('processed-preview');
@@ -103,31 +136,46 @@
         const identifyBtn = document.getElementById('identifyBtn');
         const spinner = document.getElementById('spinnerOverlay');
 
-        imageInput.addEventListener('change', e => {
+        imageInput.addEventListener('change', async e => {
             preview.innerHTML = '';
             processedPreview.innerHTML = '';
             resultDiv.innerHTML = '';
             const file = e.target.files[0];
             if (file) {
-                const reader = new FileReader();
-                reader.onload = ev => preview.innerHTML = `<img src="${ev.target.result}" alt="元画像プレビュー">`;
-                reader.readAsDataURL(file);
+                try {
+                    const showFile = await autoConvertImageIfHeic(file);
+                    const reader = new FileReader();
+                    reader.onload = ev => {
+                        preview.innerHTML = `<img src="${ev.target.result}" alt="元画像プレビュー">`;
+                    };
+                    reader.readAsDataURL(showFile);
+                } catch (err) {
+                    preview.innerHTML = `<p style="color:red;">${err.message}</p>`;
+                    console.error(err);
+                }
             }
         });
 
         uploadForm.addEventListener('submit', async e => {
             e.preventDefault();
             if (!imageInput.files[0]) return;
+
             spinner.style.display = 'flex';
             identifyBtn.disabled = true;
-            const file = imageInput.files[0];
-            const formData = new FormData(); formData.append('image', file);
 
             try {
+                let file = imageInput.files[0];
+                file = await autoConvertImageIfHeic(file);
+
+                const formData = new FormData();
+                formData.append('image', file);
+
+                // 預處理
                 const preResp = await fetch('/preprocess-image', { method: 'POST', body: formData });
                 const preData = await preResp.json();
                 processedPreview.innerHTML = `<img src="${preData.processed_image}" alt="処理後プレビュー">`;
 
+                // 識別
                 const idResp = await fetch('/identify-badge', { method: 'POST', body: formData });
                 const idData = await idResp.json();
 
@@ -153,17 +201,22 @@
                 });
 
                 document.querySelectorAll('.copy-btn').forEach(btn => {
-                    btn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                        <path d="M19 2H9a2 2 0 0 0-2 2v2h2V4h10v14H9v-2H7v2a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2z"/>
-                        <path d="M15 8H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2zm0 12H5V10h10v10z"/>
-                    </svg>`;
+                    btn.innerHTML = `
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M19 2H9a2 2 0 0 0-2 2v2h2V4h10v14H9v-2H7v2a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2z"/>
+                            <path d="M15 8H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2zm0 12H5V10h10v10z"/>
+                        </svg>`;
                     btn.dataset.tooltip = 'コピー';
                     btn.addEventListener('click', async () => {
                         const text = document.getElementById(btn.dataset.target).innerText;
                         try {
                             await navigator.clipboard.writeText(text);
-                            btn.classList.add('copied'); btn.dataset.tooltip = 'コピー完了！';
-                            setTimeout(() => { btn.classList.remove('copied'); btn.dataset.tooltip = 'コピー'; }, 1000);
+                            btn.classList.add('copied');
+                            btn.dataset.tooltip = 'コピー完了！';
+                            setTimeout(() => {
+                                btn.classList.remove('copied');
+                                btn.dataset.tooltip = 'コピー';
+                            }, 1000);
                         } catch {
                             btn.dataset.tooltip = 'コピー失敗';
                             setTimeout(() => btn.dataset.tooltip = 'コピー', 1000);
@@ -171,7 +224,8 @@
                     });
                 });
             } catch (err) {
-                resultDiv.innerHTML = `<p style=\"color:red;\">${err.message}</p>`;
+                resultDiv.innerHTML = `<p style="color:red;">${err.message}</p>`;
+                console.error(err);
             } finally {
                 spinner.style.display = 'none';
                 identifyBtn.disabled = false;
