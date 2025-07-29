@@ -2,7 +2,6 @@ from flask import Flask, request, jsonify, render_template
 import os
 import json
 from PIL import Image
-import io
 import numpy as np
 import base64
 import cv2
@@ -26,7 +25,6 @@ logger = logging.getLogger(__name__)
 # Database config (PostgreSQL only)
 # ------------------------------------------------------------------
 DATABASE_URL = os.environ.get("DATABASE_URL")
-
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL is not set. PostgreSQL connection string is required.")
 
@@ -39,7 +37,6 @@ def log_db_info():
         p.port,
         p.path.lstrip("/")
     )
-
 log_db_info()
 
 def get_conn():
@@ -85,13 +82,24 @@ COLOR_SCORE_CORR_THRESHOLD_2 = float(os.environ.get("COLOR_SCORE_CORR_THRESHOLD_
 # ------------------------------------------------------------------
 # Image hashing & helpers
 # ------------------------------------------------------------------
+
+def resize_if_large(img, max_side=1024):
+    """Resize image if any side > max_side (keep aspect ratio)."""
+    h, w = img.shape[:2]
+    if max(h, w) > max_side:
+        scale = max_side / max(h, w)
+        new_size = (int(w * scale), int(h * scale))
+        logger.info(f"Resizing large image from ({w},{h}) to {new_size}")
+        return cv2.resize(img, new_size, interpolation=cv2.INTER_AREA)
+    logger.info(f"No resize needed for image size ({w},{h})")
+    return img
+
 def fdns_hash(image: Image.Image, hash_size: int = 12, block_size: int = 16) -> str:
     """Generate perceptual hash for the image."""
     logger.debug("Calculating perceptual hash for image.")
     img = image.convert("L").resize((hash_size * block_size, hash_size * block_size), Image.Resampling.LANCZOS)
     pixels = np.asarray(img, dtype=np.float32)
     pixels -= pixels.mean()
-
     blocks = []
     for row in range(0, pixels.shape[0], block_size):
         for col in range(0, pixels.shape[1], block_size):
@@ -100,23 +108,19 @@ def fdns_hash(image: Image.Image, hash_size: int = 12, block_size: int = 16) -> 
             dc = dct_block[0, 0]
             ac = np.abs(dct_block[1:, 1:]).mean()
             blocks.append((dc, ac))
-
     dcs = np.array([b[0] for b in blocks])
     acs = np.array([b[1] for b in blocks])
     median_dc = np.median(dcs)
     median_ac = np.median(acs)
     bits = [(dc > median_dc or ac > median_ac) for dc, ac in blocks]
     bits = np.array(bits).astype(int)
-
     hash_value = 0
     for bit in bits:
         hash_value = (hash_value << 1) | int(bit)
-
     hex_str = format(hash_value, f"0{(hash_size * hash_size) // 4}x")
     assert all(c in "0123456789abcdef" for c in hex_str), f"Invalid hex hash: {hex_str}"
     logger.debug("Image hash generated: %s", hex_str)
     return hex_str
-
 
 def compute_hsv_histogram(image_bgr, hist_size: int = 32):
     """Compute and return the normalized HSV histogram for the image."""
@@ -126,9 +130,11 @@ def compute_hsv_histogram(image_bgr, hist_size: int = 32):
     logger.debug("Computed HSV histogram: %s...", h_hist[:5])
     return h_hist.tolist()
 
-
 def preprocess_image(image_file):
-    """Preprocess uploaded image, crop to badge, resize, return hash/hist."""
+    """
+    Preprocess uploaded image, resize if too large, crop to badge, 
+    resize to 256x256, return hash/histogram.
+    """
     logger.debug("Starting image preprocessing")
     image_file.seek(0)
     img_bytes = image_file.read()
@@ -138,6 +144,9 @@ def preprocess_image(image_file):
         logger.error("Failed to decode image")
         raise ValueError("Failed to decode image")
     logger.debug("Image decoded: shape %s", img.shape)
+
+    # Resize if the image is too large (for example, smartphone photo)
+    img = resize_if_large(img, max_side=1024)
 
     # Circle detection (assume badge is circular)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -165,10 +174,13 @@ def preprocess_image(image_file):
     masked = cv2.bitwise_and(img, mask)
     x1, y1, x2, y2 = max(x - r, 0), max(y - r, 0), min(x + r, img.shape[1]), min(y + r, img.shape[0])
     cropped = masked[y1:y2, x1:x2]
+    logger.info(f"Cropped badge region shape: {cropped.shape}")
 
     img_resized = cv2.resize(cropped, (256, 256), interpolation=cv2.INTER_LANCZOS4)
     pil_img = Image.fromarray(cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB))
+    logger.info("Preprocessing: Calculating hash")
     hash_value = fdns_hash(pil_img)
+    logger.info("Preprocessing: Calculating HSV histogram")
     hist_value = compute_hsv_histogram(img_resized)
 
     logger.info("Generated hash: %s", hash_value)
@@ -181,7 +193,6 @@ def preprocess_image(image_file):
 
     return hash_value, base64_img, resized_bytes, hist_value
 
-
 # ------------------------------------------------------------------
 # Grok API
 # ------------------------------------------------------------------
@@ -189,7 +200,6 @@ def call_grok_api(image_bytes):
     """Call Grok API with image and prompt; parse response JSON."""
     logger.info("Calling Grok API")
     base64_image = base64.b64encode(image_bytes).decode("utf-8")
-
     grok_model       = os.environ.get("GROK_MODEL", "grok-4-0709")
     grok_temperature = float(os.environ.get("GROK_TEMPERATURE", 0.5))
     grok_max_tokens  = int(os.environ.get("GROK_MAX_TOKENS", 1024))
@@ -198,7 +208,6 @@ def call_grok_api(image_bytes):
         '只要用日文回傳以下 JSON 格式，不要有解釋，也不要有其他文字：'
         '{"source_work":"", "character":"", "purchase_method":"", "suggested_price":"", "auction_description":""}',
     )
-
     payload = {
         "model": grok_model,
         "messages": [
@@ -214,10 +223,9 @@ def call_grok_api(image_bytes):
         "max_tokens": grok_max_tokens,
     }
     headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
-
     try:
         logger.debug("POST %s, payload size=%s bytes", GROK_API_URL, len(json.dumps(payload)))
-        response = requests.post(GROK_API_URL, json=payload, headers=headers)
+        response = requests.post(GROK_API_URL, json=payload, headers=headers, timeout=15)
         response.raise_for_status()
         result = response.json()
         logger.info("Grok API response: %s", result)
@@ -234,7 +242,6 @@ def call_grok_api(image_bytes):
         logger.error("Grok API request failed: %s", e)
         return None
 
-
 # ------------------------------------------------------------------
 # Flask routes
 # ------------------------------------------------------------------
@@ -242,7 +249,6 @@ def call_grok_api(image_bytes):
 def index():
     """Home page with upload form."""
     return render_template("index.html")
-
 
 @app.route("/preprocess-image", methods=["POST"])
 def preprocess_image_api():
@@ -259,36 +265,28 @@ def preprocess_image_api():
         logger.error("Preprocess error: %s", e)
         return jsonify({"error": str(e)}), 500
 
-
 @app.route("/identify-badge", methods=["POST"])
 def identify_badge():
     """Identify badge: try DB, fallback to Grok API, write result."""
     if "image" not in request.files:
         logger.error("No image provided for identification.")
         return jsonify({"error": "No image provided"}), 400
-
     image_file = request.files["image"]
     image_hash, _, resized_bytes, input_hist = preprocess_image(image_file)
     logger.info("Computed hash for input image: %s", image_hash)
-
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT * FROM badges")
     rows = cur.fetchall()
     logger.debug("Loaded %s rows from DB for comparison.", len(rows))
-
-    # Distance helpers
     def hamming_dist(h1, h2):
         return bin(int(h1, 16) ^ int(h2, 16)).count("1")
-
     def compare_hist(h1, h2):
         h1 = np.array(h1, dtype=np.float32)
         h2 = np.array(h2, dtype=np.float32)
         return cv2.compareHist(h1, h2, cv2.HISTCMP_CORREL)
-
     best_match = None
     best_score = -1
-
     for row in rows:
         stored_hash = row[1]
         if len(stored_hash) != len(image_hash):
@@ -300,24 +298,20 @@ def identify_badge():
             logger.error("Hash comparison error with DB ID %s: %s", row[0], e)
             continue
         logger.info("Comparing with DB ID %s → Hash dist: %s", row[0], dist)
-
         color_score = 0
         color_hist_str = row[7]
         if color_hist_str:
             db_hist = json.loads(color_hist_str)
             color_score = compare_hist(input_hist, db_hist)
             logger.info("Color correlation with ID %s: %.4f", row[0], color_score)
-
         match = (
             (dist <= COLOR_SCORE_DIST_THRESHOLD_1 and color_score >= COLOR_SCORE_CORR_THRESHOLD_1) or
             (dist <= COLOR_SCORE_DIST_THRESHOLD_2 and color_score >= COLOR_SCORE_CORR_THRESHOLD_2)
         )
         logger.debug("Match flag for DB ID %s: %s", row[0], match)
-
         if match and (best_match is None or dist < hamming_dist(image_hash, best_match[1])):
             best_match = row
             best_score = color_score
-
     if best_match:
         logger.info("✅ Match found: ID=%s | score=%s", best_match[0], best_score)
         conn.close()
@@ -332,19 +326,16 @@ def identify_badge():
                 "matched": True,
             }
         )
-
     # Not found → call Grok API
     logger.info("❌ No match found → calling Grok API for image hash: %s", image_hash)
     grok_result = call_grok_api(resized_bytes)
     logger.debug("Grok result: %s", grok_result)
-
     # Fallback values
     source_work = "[unknown]"
     character = "[unknown]"
     purchase_method = "[unknown]"
     suggested_price = "[unknown]"
     auction_description = "[unknown]"
-
     if grok_result:
         source_work = grok_result.get("source_work", "[unknown]")
         character = grok_result.get("character", "[unknown]")
@@ -352,7 +343,6 @@ def identify_badge():
         suggested_price = grok_result.get("suggested_price", "[unknown]")
         auction_description = grok_result.get("auction_description", "[unknown]")
         logger.info("Inserting Grok result into DB for hash %s.", image_hash)
-
         cur.execute(
             """
             INSERT INTO badges (
@@ -381,9 +371,7 @@ def identify_badge():
         conn.commit()
     else:
         logger.warning("Grok API did not return a valid result. Inserting [unknown].")
-
     conn.close()
-
     return jsonify(
         {
             "image_hash": image_hash,
@@ -395,7 +383,6 @@ def identify_badge():
             "matched": False,
         }
     )
-
 
 # ------------------------------------------------------------------
 # Local testing entry-point
