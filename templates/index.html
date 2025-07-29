@@ -1,8 +1,8 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ja">
 <head>
     <meta charset="UTF-8">
-    <title>Badge Identification Service</title>
+    <title>バッジ識別サービス</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -32,7 +32,7 @@
             max-width: 100%;
             max-height: 100%;
             display: block;
-            margin: 0 auto 0 auto;
+            margin: 0 auto;
             background: #fff;
             box-shadow: 0 0 2px #bbb;
             border-radius: 4px;
@@ -74,11 +74,10 @@
     </style>
 </head>
 <body>
-    <h1>Upload Badge Image for Identification</h1>
+    <h1>バッジ画像をアップロードして識別</h1>
     <form id="uploadForm">
         <input type="file" id="image" accept="image/*" required>
-        <button type="button" id="preprocessBtn">Preprocess</button>
-        <button type="submit">Start Identification</button>
+        <button type="submit">識別開始</button>
     </form>
     <div class="preview-container">
         <div id="preview"></div>
@@ -91,14 +90,14 @@
         const preview = document.getElementById('preview');
         const processedPreview = document.getElementById('processed-preview');
         const resultDiv = document.getElementById('result');
-        const preprocessBtn = document.getElementById('preprocessBtn');
+        const uploadForm = document.getElementById('uploadForm');
 
         imageInput.addEventListener('change', function(e) {
             const file = e.target.files[0];
             if (file) {
                 const reader = new FileReader();
                 reader.onload = function(e) {
-                    preview.innerHTML = `<img src="${e.target.result}" alt="Original Preview">`;
+                    preview.innerHTML = `<img src="${e.target.result}" alt="元画像プレビュー">`;
                 };
                 reader.readAsDataURL(file);
             } else {
@@ -108,51 +107,48 @@
             resultDiv.innerHTML = '';
         });
 
-        preprocessBtn.addEventListener('click', async () => {
-            if (!imageInput.files[0]) {
-                alert('Please select an image first');
-                return;
-            }
-            const formData = new FormData();
-            formData.append('image', imageInput.files[0]);
-            try {
-                const response = await fetch('/preprocess-image', { method: 'POST', body: formData });
-                if (!response.ok) throw new Error('Preprocessing error: ' + response.statusText);
-                const data = await response.json();
-                processedPreview.innerHTML = `
-                    <img src="${data.processed_image}" alt="Processed Preview">
-                    <div class="img-hash-text"><strong>Image Hash:</strong> ${data.image_hash}</div>
-                `;
-            } catch (error) {
-                processedPreview.innerHTML = `<p style="color:red;">${error.message}</p>`;
-            }
-        });
-
-        document.getElementById('uploadForm').addEventListener('submit', async (e) => {
+        uploadForm.addEventListener('submit', async (e) => {
             e.preventDefault();
             if (!imageInput.files[0]) {
-                alert('Please select an image first');
+                alert('最初に画像を選択してください');
                 return;
             }
+            const file = imageInput.files[0];
             const formData = new FormData();
-            formData.append('image', imageInput.files[0]);
-            try {
-                const response = await fetch('/identify-badge', { method: 'POST', body: formData });
-                const data = await response.json();
-                if (!response.ok) throw new Error(data.error || 'Identification failed');
+            formData.append('image', file);
 
-                const matchInfo = data.matched
-                    ? '<span style="color:green;">✅ Found in DB</span>'
-                    : '<span style="color:red;">❌ Not Found in DB → Inserted as Placeholder</span>';
+            try {
+                // 前処理
+                const preResp = await fetch('/preprocess-image', {
+                    method: 'POST',
+                    body: formData
+                });
+                if (!preResp.ok) throw new Error('前処理エラー: ' + preResp.statusText);
+                const preData = await preResp.json();
+                processedPreview.innerHTML = `
+                    <img src="${preData.processed_image}" alt="処理後プレビュー">
+                `;
+
+                // 識別
+                const idResp = await fetch('/identify-badge', {
+                    method: 'POST',
+                    body: formData
+                });
+                const idData = await idResp.json();
+                if (!idResp.ok) throw new Error(idData.error || '識別に失敗しました');
+
+                const matchInfo = idData.matched
+                    ? '<span style="color:green;">✅ データベースに存在します</span>'
+                    : '<span style="color:red;">おめでとうございます！このバッジを初めて発見した方です。</span>';
 
                 resultDiv.innerHTML = `
-                    <p><strong>Match Status:</strong> ${matchInfo}</p>
-                    <p><strong>Image Hash:</strong> ${data.image_hash}</p>
-                    <p><strong>Origin Work:</strong> ${data.source_work}</p>
-                    <p><strong>Character:</strong> ${data.character}</p>
-                    <p><strong>How to Purchase:</strong> ${data.purchase_method}</p>
-                    <p><strong>Suggested Price:</strong> ${data.suggested_price}</p>
-                    <p><strong>Auction Description:</strong> ${data.auction_description}</p>
+                    <p><strong>一致状況：</strong> ${matchInfo}</p>
+                    <p><strong>画像ハッシュ：</strong> ${idData.image_hash}</p>
+                    <p><strong>出典作品：</strong> ${idData.source_work}</p>
+                    <p><strong>キャラクター：</strong> ${idData.character}</p>
+                    <p><strong>購入方法：</strong> ${idData.purchase_method}</p>
+                    <p><strong>推奨価格：</strong> ${idData.suggested_price}</p>
+                    <p><strong>オークション説明：</strong> ${idData.auction_description}</p>
                 `;
             } catch (error) {
                 resultDiv.innerHTML = `<p style="color:red;">${error.message}</p>`;
