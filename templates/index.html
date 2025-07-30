@@ -27,7 +27,7 @@
     <script src="https://cdn.jsdelivr.net/npm/heic2any/dist/heic2any.min.js"></script>
 
     <script>
-        // --- HEIC/HEIF auto convert to PNG (iOS photo fix) ---
+        /* --- HEIC/HEIF auto convert to PNG (iOS photo fix) --- */
         async function autoConvertImageIfHeic(file) {
             const isHeic = (
                 file.type === "image/heic" ||
@@ -35,51 +35,41 @@
                 file.name.toLowerCase().endsWith(".heic") ||
                 file.name.toLowerCase().endsWith(".heif")
             );
-
             if (!isHeic) return file;
 
             try {
-                // 透過 heic2any 轉換為 PNG Blob
                 let converted = await heic2any({ blob: file, toType: "image/png" });
-                // heic2any 可能回傳 Blob 或 Blob 陣列，統一取第一筆
                 if (Array.isArray(converted)) converted = converted[0];
-                const pngFile = new File(
-                    [converted],
-                    file.name.replace(/\.(heic|heif)$/i, ".png"),
-                    { type: "image/png" }
-                );
-                return pngFile;
+                return new File([converted], file.name.replace(/\.(heic|heif)$/i, ".png"), { type: "image/png" });
             } catch (err) {
                 console.error("HEIC convert failed.", err);
                 throw new Error("HEIC convert failed.");
             }
         }
 
-        const imageInput = document.getElementById('image');
-        const preview = document.getElementById('preview');
-        const processedPreview = document.getElementById('processed-preview');
-        const resultDiv = document.getElementById('result');
-        const uploadForm = document.getElementById('uploadForm');
-        const identifyBtn = document.getElementById('identifyBtn');
-        const spinner = document.getElementById('spinnerOverlay');
+        const imageInput      = document.getElementById('image');
+        const preview         = document.getElementById('preview');
+        const processedPreview= document.getElementById('processed-preview');
+        const resultDiv       = document.getElementById('result');
+        const uploadForm      = document.getElementById('uploadForm');
+        const identifyBtn     = document.getElementById('identifyBtn');
+        const spinner         = document.getElementById('spinnerOverlay');
 
         imageInput.addEventListener('change', async e => {
-            preview.innerHTML = '';
-            processedPreview.innerHTML = '';
-            resultDiv.innerHTML = '';
+            preview.innerHTML = processedPreview.innerHTML = resultDiv.innerHTML = '';
             const file = e.target.files[0];
-            if (file) {
-                try {
-                    const showFile = await autoConvertImageIfHeic(file);
-                    const reader = new FileReader();
-                    reader.onload = ev => {
-                        preview.innerHTML = `<img src="${ev.target.result}" alt="元画像プレビュー">`;
-                    };
-                    reader.readAsDataURL(showFile);
-                } catch (err) {
-                    preview.innerHTML = `<p style="color:red;">${err.message}</p>`;
-                    console.error(err);
-                }
+            if (!file) return;
+
+            try {
+                const showFile = await autoConvertImageIfHeic(file);
+                const reader   = new FileReader();
+                reader.onload  = ev => {
+                    preview.innerHTML = `<img src="${ev.target.result}" alt="元画像プレビュー">`;
+                };
+                reader.readAsDataURL(showFile);
+            } catch (err) {
+                preview.innerHTML = `<p style="color:red;">${err.message}</p>`;
+                console.error(err);
             }
         });
 
@@ -88,66 +78,51 @@
             if (!imageInput.files[0]) return;
 
             spinner.style.display = 'flex';
-            identifyBtn.disabled = true;
+            identifyBtn.disabled  = true;
 
             try {
-                let file = imageInput.files[0];
-                file = await autoConvertImageIfHeic(file);
-
+                let file = await autoConvertImageIfHeic(imageInput.files[0]);
                 const formData = new FormData();
                 formData.append('image', file);
 
-                // 預處理
-                const preResp = await fetch('/preprocess-image', { method: 'POST', body: formData });
+                /* Preprocess */
+                const preResp = await fetch('/preprocess-image', { method:'POST', body:formData });
                 const preData = await preResp.json();
                 processedPreview.innerHTML = `<img src="${preData.processed_image}" alt="処理後プレビュー">`;
 
-                // 識別
-                const idResp = await fetch('/identify-badge', { method: 'POST', body: formData });
+                /* Identify */
+                const idResp = await fetch('/identify-badge', { method:'POST', body:formData });
                 const idData = await idResp.json();
 
                 const fields = [
-                    ['一致状況', idData.matched ? '✅ データベースに存在します' : 'おめでとうございます！このバッジを初めて発見した方です。'],
-//                    ['画像ハッシュ', idData.image_hash],
-                    ['出典作品', idData.source_work],
+                    ['一致状況',    idData.matched ? '✅ データベースに存在します' : 'おめでとうございます！このバッジを初めて発見した方です。'],
+                    /* ['画像ハッシュ', idData.image_hash], */
+                    ['出典作品',    idData.source_work],
                     ['キャラクター', idData.character],
-                    ['購入方法', idData.purchase_method],
-                    ['推奨価格', idData.suggested_price],
+                    ['購入方法',    idData.purchase_method],
+                    ['推奨価格',    idData.suggested_price],
                     ['オークション説明', idData.auction_description]
                 ];
+
                 resultDiv.innerHTML = '';
                 fields.forEach(([label, value], idx) => {
                     const fid = `field${idx}`;
-                    const fieldDiv = document.createElement('div'); fieldDiv.className = 'field';
+                    const fieldDiv = document.createElement('div');
+                    fieldDiv.className = 'field';
                     fieldDiv.innerHTML = `
                         <span class="field-label">${label}：</span>
                         <span class="field-value" id="${fid}">${value}</span>
-                        <button class="copy-btn" data-target="${fid}" aria-label="コピー"></button>
                     `;
                     resultDiv.appendChild(fieldDiv);
                 });
 
-                document.querySelectorAll('.copy-btn').forEach(btn => {
-                    btn.innerHTML = `
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                            <path d="M19 2H9a2 2 0 0 0-2 2v2h2V4h10v14H9v-2H7v2a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2z"/>
-                            <path d="M15 8H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2zm0 12H5V10h10v10z"/>
-                        </svg>`;
-                    btn.dataset.tooltip = 'コピー';
-                    btn.addEventListener('click', async () => {
-                        const text = document.getElementById(btn.dataset.target).innerText;
+                document.querySelectorAll('#result .field-value').forEach(span => {
+                    span.addEventListener('click', async () => {
                         try {
-                            await navigator.clipboard.writeText(text);
-                            btn.classList.add('copied');
-                            btn.dataset.tooltip = 'コピー完了！';
-                            setTimeout(() => {
-                                btn.classList.remove('copied');
-                                btn.dataset.tooltip = 'コピー';
-                            }, 1000);
-                        } catch {
-                            btn.dataset.tooltip = 'コピー失敗';
-                            setTimeout(() => btn.dataset.tooltip = 'コピー', 1000);
-                        }
+                            await navigator.clipboard.writeText(span.innerText);
+                            span.style.opacity = 0.4;
+                            setTimeout(() => (span.style.opacity = ''), 300);
+                        } catch {}
                     });
                 });
             } catch (err) {
@@ -155,7 +130,7 @@
                 console.error(err);
             } finally {
                 spinner.style.display = 'none';
-                identifyBtn.disabled = false;
+                identifyBtn.disabled  = false;
             }
         });
     </script>
