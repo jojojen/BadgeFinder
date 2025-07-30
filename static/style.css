@@ -23,7 +23,7 @@ button:disabled { background: #a0c3ff; }
 
 .img-hash-text { margin-top: 8px; font-size: 0.9rem; }
 
-#result { background: #fff; border-radius: 8px; padding: 16px; margin-top: 16px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+#result { background: #fff; border-radius: 8px; padding: 16px; margin-top: 16px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); text-align: left;}
 
 #result .field {
     display: flex;
@@ -38,7 +38,7 @@ button:disabled { background: #a0c3ff; }
     margin-right: 8px;
     flex-shrink: 0;
     min-width: 7.2em;
-    text-align: right;
+    text-align: left;
 }
 
 #result .field-value {
