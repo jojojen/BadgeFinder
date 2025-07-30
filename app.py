@@ -237,6 +237,7 @@ def call_grok_api(image_bytes):
         result = response.json()
         logger.info("Grok API response JSON parsed in %.2fs", time.time()-start_grok)
         content = result["choices"][0]["message"]["content"]
+        logger.debug("Grok full JSON preview=%s…", json.dumps(result)[:400])
         logger.debug("Grok raw content: %s", content)
         try:
             parsed_result = json.loads(content)
