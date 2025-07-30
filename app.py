@@ -11,6 +11,7 @@ import requests
 from dotenv import load_dotenv
 import psycopg2
 from urllib.parse import urlparse
+import time
 
 load_dotenv()
 
@@ -79,6 +80,9 @@ COLOR_SCORE_CORR_THRESHOLD_1 = float(os.environ.get("COLOR_SCORE_CORR_THRESHOLD_
 COLOR_SCORE_DIST_THRESHOLD_2 = float(os.environ.get("COLOR_SCORE_DIST_THRESHOLD_2", 30))
 COLOR_SCORE_CORR_THRESHOLD_2 = float(os.environ.get("COLOR_SCORE_CORR_THRESHOLD_2", 0.92))
 GROK_API_TIMEOUT = int(os.environ.get("GROK_API_TIMEOUT", 15))
+
+# === 一次性列出與超時相關的環境設定
+logger.info("GROK timeout=%ss | payload max_tokens=%s | API=%s", GROK_API_TIMEOUT, os.environ.get("GROK_MAX_TOKENS", 1024), GROK_API_URL)
 
 # ------------------------------------------------------------------
 # Image hashing & helpers
@@ -199,6 +203,7 @@ def preprocess_image(image_file):
 # ------------------------------------------------------------------
 def call_grok_api(image_bytes):
     """Call Grok API with image and prompt; parse response JSON."""
+    start_grok = time.time()                       
     logger.info("Calling Grok API")
     base64_image = base64.b64encode(image_bytes).decode("utf-8")
     grok_model       = os.environ.get("GROK_MODEL", "grok-4-0709")
@@ -227,20 +232,21 @@ def call_grok_api(image_bytes):
     try:
         logger.debug("POST %s, payload size=%s bytes", GROK_API_URL, len(json.dumps(payload)))
         response = requests.post(GROK_API_URL, json=payload, headers=headers, timeout=GROK_API_TIMEOUT)
+        logger.debug("Grok HTTP status: %s | time %.2fs", response.status_code, time.time()-start_grok)
         response.raise_for_status()
         result = response.json()
-        logger.info("Grok API response: %s", result)
+        logger.info("Grok API response JSON parsed in %.2fs", time.time()-start_grok)
         content = result["choices"][0]["message"]["content"]
         logger.debug("Grok raw content: %s", content)
         try:
             parsed_result = json.loads(content)
-            logger.info("Parsed Grok JSON successfully")
+            logger.info("Parsed Grok JSON successfully (%.2fs)", time.time()-start_grok)
         except json.JSONDecodeError:
-            logger.error("Failed to parse Grok API content as JSON")
+            logger.error("Failed to parse Grok API content as JSON (%.2fs)", time.time()-start_grok)
             parsed_result = {}
         return parsed_result
     except Exception as e:
-        logger.error("Grok API request failed: %s", e)
+        logger.error("Grok API request failed after %.2fs: %s", time.time()-start_grok, e)
         return None
 
 # ------------------------------------------------------------------
@@ -269,6 +275,7 @@ def preprocess_image_api():
 @app.route("/identify-badge", methods=["POST"])
 def identify_badge():
     """Identify badge: try DB, fallback to Grok API, write result."""
+    request_start = time.time()                              
     if "image" not in request.files:
         logger.error("No image provided for identification.")
         return jsonify({"error": "No image provided"}), 400
@@ -277,9 +284,10 @@ def identify_badge():
     logger.info("Computed hash for input image: %s", image_hash)
     conn = get_conn()
     cur = conn.cursor()
+    db_fetch_start = time.time()                             
     cur.execute("SELECT * FROM badges")
     rows = cur.fetchall()
-    logger.debug("Loaded %s rows from DB for comparison.", len(rows))
+    logger.debug("Loaded %s rows from DB for comparison in %.2fs.", len(rows), time.time()-db_fetch_start)  
     def hamming_dist(h1, h2):
         return bin(int(h1, 16) ^ int(h2, 16)).count("1")
     def compare_hist(h1, h2):
@@ -288,6 +296,7 @@ def identify_badge():
         return cv2.compareHist(h1, h2, cv2.HISTCMP_CORREL)
     best_match = None
     best_score = -1
+    loop_start = time.time()                                 
     for row in rows:
         stored_hash = row[1]
         if len(stored_hash) != len(image_hash):
@@ -313,9 +322,11 @@ def identify_badge():
         if match and (best_match is None or dist < hamming_dist(image_hash, best_match[1])):
             best_match = row
             best_score = color_score
+    logger.debug("DB loop finished in %.2fs", time.time()-loop_start)  
     if best_match:
         logger.info("✅ Match found: ID=%s | score=%s", best_match[0], best_score)
         conn.close()
+        logger.debug("Total identify_badge time %.2fs (from start)", time.time()-request_start)  
         return jsonify(
             {
                 "image_hash": image_hash,
@@ -373,6 +384,7 @@ def identify_badge():
     else:
         logger.warning("Grok API did not return a valid result. Inserting [unknown].")
     conn.close()
+    logger.debug("Total identify_badge time %.2fs (from start)", time.time()-request_start)  
     return jsonify(
         {
             "image_hash": image_hash,
