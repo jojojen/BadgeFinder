@@ -94,7 +94,6 @@ COLOR_SCORE_DIST_THRESHOLD_2 = float(os.environ.get("COLOR_SCORE_DIST_THRESHOLD_
 COLOR_SCORE_CORR_THRESHOLD_2 = float(os.environ.get("COLOR_SCORE_CORR_THRESHOLD_2", 0.92))
 GROK_API_TIMEOUT = int(os.environ.get("GROK_API_TIMEOUT", 15))
 
-# === 一次性列出與超時相關的環境設定
 logger.info("GROK timeout=%ss | payload max_tokens=%s | API=%s", GROK_API_TIMEOUT, os.environ.get("GROK_MAX_TOKENS", 1024), GROK_API_URL)
 
 # ------------------------------------------------------------------
@@ -325,7 +324,7 @@ def identify_badge():
                 "purchase_method": purchase_method,
                 "suggested_price": suggested_price,
                 "auction_description": auction_description,
-                "matched": True,
+                "matched": False,
             }
         )
     # Grok did not return a valid result → insert into failed_grok and request feedback
