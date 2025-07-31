@@ -266,7 +266,7 @@ def identify_badge():
                 "image_hash": image_hash,
                 "source_work": best_match[2],
                 "character": best_match[3],
-                "channel": best_match[4],
+                "purchase_channel": best_match[4],
                 "acquisition_difficulty": best_match[5],
                 "auction_description": best_match[6],
                 "matched": True,
@@ -280,7 +280,7 @@ def identify_badge():
         # If Grok returned a result, extract fields and insert into badges
         source_work = grok_result.get("source_work", "[unknown]")
         character = grok_result.get("character", "[unknown]")
-        channel = grok_result.get("channel", "[unknown]")
+        purchase_channel = grok_result.get("purchase_channel", "[unknown]")
         acquisition_difficulty = grok_result.get("acquisition_difficulty", "[unknown]")
         auction_description = grok_result.get("auction_description", "[unknown]")
         logger.info("Inserting Grok result into DB for hash %s.", image_hash)
@@ -288,14 +288,14 @@ def identify_badge():
             cur.execute(
                 """
                 INSERT INTO badges (
-                    image_hash, source_work, character, channel,
+                    image_hash, source_work, character, purchase_channel,
                     acquisition_difficulty, auction_description, color_hist
                 )
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (image_hash) DO UPDATE SET
                     source_work         = EXCLUDED.source_work,
                     character           = EXCLUDED.character,
-                    channel     = EXCLUDED.channel,
+                    purchase_channel     = EXCLUDED.purchase_channel,
                     acquisition_difficulty     = EXCLUDED.acquisition_difficulty,
                     auction_description = EXCLUDED.auction_description,
                     color_hist          = EXCLUDED.color_hist
@@ -304,7 +304,7 @@ def identify_badge():
                     image_hash,
                     source_work,
                     character,
-                    channel,
+                    purchase_channel,
                     acquisition_difficulty,
                     auction_description,
                     json.dumps(input_hist),
@@ -321,7 +321,7 @@ def identify_badge():
                 "image_hash": image_hash,
                 "source_work": source_work,
                 "character": character,
-                "channel": channel,
+                "purchase_channel": purchase_channel,
                 "acquisition_difficulty": acquisition_difficulty,
                 "auction_description": auction_description,
                 "matched": False,
@@ -386,7 +386,7 @@ def feedback():
             ON CONFLICT (image_hash) DO UPDATE SET
                 source_work         = EXCLUDED.source_work,
                 character           = EXCLUDED.character,
-                channel     = EXCLUDED.purchase_channel,
+                purchase_channel     = EXCLUDED.purchase_channel,
                 acquisition_difficulty     = EXCLUDED.acquisition_difficulty,
                 auction_description = EXCLUDED.auction_description,
                 color_hist          = EXCLUDED.color_hist
