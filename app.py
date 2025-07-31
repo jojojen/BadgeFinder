@@ -8,6 +8,7 @@ import cv2
 import logging
 from scipy.fftpack import dct
 import requests
+from requests.exceptions import Timeout  # import Timeout exception for handling request timeouts
 from dotenv import load_dotenv
 import psycopg2
 from urllib.parse import urlparse
@@ -62,6 +63,16 @@ def init_db():
             suggested_price TEXT,
             auction_description TEXT,
             color_hist      TEXT
+        );
+        """
+    )
+    # Create a separate table to store images that Grok failed to classify
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS failed_grok (
+            id         SERIAL PRIMARY KEY,
+            image_hash TEXT,
+            base64     TEXT
         );
         """
     )
@@ -125,23 +136,51 @@ def call_grok_api(image_bytes):
     headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
     try:
         logger.debug("POST %s, payload size=%s bytes", GROK_API_URL, len(json.dumps(payload)))
+        # First attempt with configured timeout
         response = requests.post(GROK_API_URL, json=payload, headers=headers, timeout=GROK_API_TIMEOUT)
-        logger.debug("Grok HTTP status: %s | time %.2fs", response.status_code, time.time()-start_grok)
+        logger.debug("Grok HTTP status: %s | time %.2fs", response.status_code, time.time() - start_grok)
+    except Timeout:
+        # If the first request times out, log a warning and retry once with a longer timeout
+        logger.warning(
+            "Grok API timeout after %s seconds, retrying once with %s seconds", GROK_API_TIMEOUT, GROK_API_TIMEOUT * 2
+        )
+        try:
+            response = requests.post(
+                GROK_API_URL,
+                json=payload,
+                headers=headers,
+                timeout=GROK_API_TIMEOUT * 2,
+            )
+            logger.debug(
+                "Grok retry HTTP status: %s | time %.2fs", response.status_code, time.time() - start_grok
+            )
+        except Exception as retry_exc:
+            # If the retry also fails, return None
+            logger.error(
+                "Grok API retry failed after %.2fs: %s", time.time() - start_grok, retry_exc
+            )
+            return None
+    except Exception as e:
+        # For other exceptions (e.g., network errors), return None
+        logger.error("Grok API request failed after %.2fs: %s", time.time() - start_grok, e)
+        return None
+    try:
         response.raise_for_status()
         result = response.json()
-        logger.info("Grok API response JSON parsed in %.2fs", time.time()-start_grok)
+        logger.info("Grok API response JSON parsed in %.2fs", time.time() - start_grok)
         content = result["choices"][0]["message"]["content"]
         logger.debug("Grok full JSON preview=%s…", json.dumps(result)[:400])
         logger.debug("Grok raw content: %s", content)
         try:
             parsed_result = json.loads(content)
-            logger.info("Parsed Grok JSON successfully (%.2fs)", time.time()-start_grok)
+            logger.info("Parsed Grok JSON successfully (%.2fs)", time.time() - start_grok)
         except json.JSONDecodeError:
-            logger.error("Failed to parse Grok API content as JSON (%.2fs)", time.time()-start_grok)
+            logger.error("Failed to parse Grok API content as JSON (%.2fs)", time.time() - start_grok)
             parsed_result = {}
         return parsed_result
     except Exception as e:
-        logger.error("Grok API request failed after %.2fs: %s", time.time()-start_grok, e)
+        # Catch JSON parsing or status errors
+        logger.error("Grok API response processing failed after %.2fs: %s", time.time() - start_grok, e)
         return None
 
 # ------------------------------------------------------------------
@@ -169,13 +208,14 @@ def preprocess_image_api():
 
 @app.route("/identify-badge", methods=["POST"])
 def identify_badge():
-    """Identify badge: try DB, fallback to Grok API, write result."""
+    """Identify badge: try DB, fallback to Grok, and record failures."""
     request_start = time.time()                              
     if "image" not in request.files:
         logger.error("No image provided for identification.")
         return jsonify({"error": "No image provided"}), 400
     image_file = request.files["image"]
-    image_hash, _, resized_bytes, input_hist = preprocess_image(image_file)
+    # Preprocess the image and capture the base64 representation for potential storage
+    image_hash, base64_img, resized_bytes, input_hist = preprocess_image(image_file)
     logger.info("Computed hash for input image: %s", image_hash)
     conn = get_conn()
     cur = conn.cursor()
@@ -233,23 +273,110 @@ def identify_badge():
                 "matched": True,
             }
         )
-    # Not found → call Grok API
+    # Not found → calling Grok API; if Grok fails, store the hash and base64
     logger.info("❌ No match found → calling Grok API for image hash: %s", image_hash)
     grok_result = call_grok_api(resized_bytes)
     logger.debug("Grok result: %s", grok_result)
-    # Fallback values
-    source_work = "[unknown]"
-    character = "[unknown]"
-    purchase_method = "[unknown]"
-    suggested_price = "[unknown]"
-    auction_description = "[unknown]"
     if grok_result:
+        # If Grok returned a result, extract fields and insert into badges
         source_work = grok_result.get("source_work", "[unknown]")
         character = grok_result.get("character", "[unknown]")
         purchase_method = grok_result.get("purchase_method", "[unknown]")
         suggested_price = grok_result.get("suggested_price", "[unknown]")
         auction_description = grok_result.get("auction_description", "[unknown]")
         logger.info("Inserting Grok result into DB for hash %s.", image_hash)
+        try:
+            cur.execute(
+                """
+                INSERT INTO badges (
+                    image_hash, source_work, character, purchase_method,
+                    suggested_price, auction_description, color_hist
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (image_hash) DO UPDATE SET
+                    source_work         = EXCLUDED.source_work,
+                    character           = EXCLUDED.character,
+                    purchase_method     = EXCLUDED.purchase_method,
+                    suggested_price     = EXCLUDED.suggested_price,
+                    auction_description = EXCLUDED.auction_description,
+                    color_hist          = EXCLUDED.color_hist
+                """,
+                (
+                    image_hash,
+                    source_work,
+                    character,
+                    purchase_method,
+                    suggested_price,
+                    auction_description,
+                    json.dumps(input_hist),
+                ),
+            )
+            conn.commit()
+        except Exception as e:
+            logger.error("Failed to insert Grok result for hash %s: %s", image_hash, e)
+            conn.rollback()
+        conn.close()
+        logger.debug("Total identify_badge time %.2fs (from start)", time.time()-request_start)
+        return jsonify(
+            {
+                "image_hash": image_hash,
+                "source_work": source_work,
+                "character": character,
+                "purchase_method": purchase_method,
+                "suggested_price": suggested_price,
+                "auction_description": auction_description,
+                "matched": True,
+            }
+        )
+    # Grok did not return a valid result → insert into failed_grok and request feedback
+    logger.warning("Grok API did not return a valid result. Storing image_hash and base64 in failed_grok.")
+    try:
+        cur.execute(
+            "INSERT INTO failed_grok (image_hash, base64) VALUES (%s, %s)",
+            (image_hash, base64_img),
+        )
+        conn.commit()
+    except Exception as e:
+        logger.error("Failed to insert failed_grok record for hash %s: %s", image_hash, e)
+        conn.rollback()
+    conn.close()
+    logger.debug("Total identify_badge time %.2fs (from start)", time.time()-request_start)  
+    return jsonify(
+        {
+            "image_hash": image_hash,
+            "color_hist": input_hist,
+            "matched": False,
+        }
+    )
+
+# ------------------------------------------------------------------
+# Feedback endpoint
+# ------------------------------------------------------------------
+@app.route("/feedback", methods=["POST"])
+def feedback():
+    """Accept user feedback to insert a new badge entry into the database.
+
+    When the identify_badge endpoint does not find a match, the front‑end will
+    prompt the user to enter information about the badge. This endpoint
+    receives that data and writes it to the database. All fields are optional
+    except the image_hash and color_hist, which are required to uniquely
+    identify the badge and store its color histogram.
+
+    Returns a JSON response indicating success or error.
+    """
+    image_hash = request.form.get("image_hash")
+    color_hist_str = request.form.get("color_hist")
+    if not image_hash or not color_hist_str:
+        return jsonify({"error": "Missing image_hash or color_hist"}), 400
+    source_work = request.form.get("source_work", "[unknown]")
+    character = request.form.get("character", "[unknown]")
+    purchase_method = request.form.get("purchase_method", "[unknown]")
+    suggested_price = request.form.get("suggested_price", "[unknown]")
+    auction_description = request.form.get("auction_description", "[unknown]")
+    # Insert or update the badge entry using user feedback
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
         cur.execute(
             """
             INSERT INTO badges (
@@ -272,25 +399,17 @@ def identify_badge():
                 purchase_method,
                 suggested_price,
                 auction_description,
-                json.dumps(input_hist),
+                color_hist_str,
             ),
         )
         conn.commit()
-    else:
-        logger.warning("Grok API did not return a valid result. Inserting [unknown].")
+    except Exception as e:
+        logger.error("Failed to insert feedback for hash %s: %s", image_hash, e)
+        conn.rollback()
+        conn.close()
+        return jsonify({"error": "Database error"}), 500
     conn.close()
-    logger.debug("Total identify_badge time %.2fs (from start)", time.time()-request_start)  
-    return jsonify(
-        {
-            "image_hash": image_hash,
-            "source_work": source_work,
-            "character": character,
-            "purchase_method": purchase_method,
-            "suggested_price": suggested_price,
-            "auction_description": auction_description,
-            "matched": False,
-        }
-    )
+    return jsonify({"status": "success"})
 
 # ------------------------------------------------------------------
 # Local testing entry-point

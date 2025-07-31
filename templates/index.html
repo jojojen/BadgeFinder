@@ -4,21 +4,49 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
     <title>バッジ識別サービス</title>
+    <!-- 外部スタイルシートの読み込み -->
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
     <h1>バッジ識別サービス</h1>
     <div class="container">
+        <!-- 画像アップロードフォーム -->
         <form id="uploadForm">
             <input type="file" id="image" accept="image/*,.heic,.heif" required>
             <button type="submit" id="identifyBtn">識別開始</button>
         </form>
+        <!-- プレビュー表示エリア -->
         <div class="preview-container">
             <div id="preview" class="preview-box"></div>
             <div id="processed-preview" class="preview-box"></div>
         </div>
+        <!-- 結果表示エリア -->
         <div id="result"></div>
+        <!-- 未識別時に表示するユーザー入力フォーム -->
+        <div id="feedbackForm" style="display: none; margin-top: 1rem;">
+            <h2>情報提供のお願い</h2>
+            <!-- hash と histogram を保持する隠しフィールド -->
+            <input type="hidden" id="feedbackHash">
+            <input type="hidden" id="feedbackHist">
+            <div>
+                <label>出典作品: <input type="text" id="sourceWorkInput" placeholder="例: 作品名"></label>
+            </div>
+            <div>
+                <label>キャラクター: <input type="text" id="characterInput" placeholder="例: キャラクター名"></label>
+            </div>
+            <div>
+                <label>購入方法: <input type="text" id="purchaseMethodInput" placeholder="例: ガチャ/通販など"></label>
+            </div>
+            <div>
+                <label>推奨価格: <input type="text" id="suggestedPriceInput" placeholder="例: 1000円"></label>
+            </div>
+            <div>
+                <label>オークション説明: <textarea id="auctionDescriptionInput" rows="3" placeholder="その他の情報"></textarea></label>
+            </div>
+            <button type="button" id="submitFeedbackBtn">送信</button>
+        </div>
     </div>
+    <!-- 読み込み中に表示するスピナー -->
     <div class="spinner-overlay" id="spinnerOverlay">
         <div class="spinner"></div>
     </div>
@@ -47,23 +75,32 @@
             }
         }
 
-        const imageInput      = document.getElementById('image');
-        const preview         = document.getElementById('preview');
-        const processedPreview= document.getElementById('processed-preview');
-        const resultDiv       = document.getElementById('result');
-        const uploadForm      = document.getElementById('uploadForm');
-        const identifyBtn     = document.getElementById('identifyBtn');
-        const spinner         = document.getElementById('spinnerOverlay');
+        const imageInput       = document.getElementById('image');
+        const preview          = document.getElementById('preview');
+        const processedPreview = document.getElementById('processed-preview');
+        const resultDiv        = document.getElementById('result');
+        const uploadForm       = document.getElementById('uploadForm');
+        const identifyBtn      = document.getElementById('identifyBtn');
+        const spinner          = document.getElementById('spinnerOverlay');
+        const feedbackForm     = document.getElementById('feedbackForm');
+        const feedbackHash     = document.getElementById('feedbackHash');
+        const feedbackHist     = document.getElementById('feedbackHist');
 
+        // ファイル選択時のプレビュー表示
         imageInput.addEventListener('change', async e => {
-            preview.innerHTML = processedPreview.innerHTML = resultDiv.innerHTML = '';
+            // 以前のプレビュー・結果・フォームをクリア
+            preview.innerHTML = '';
+            processedPreview.innerHTML = '';
+            resultDiv.innerHTML = '';
+            feedbackForm.style.display = 'none';
+
             const file = e.target.files[0];
             if (!file) return;
 
             try {
                 const showFile = await autoConvertImageIfHeic(file);
-                const reader   = new FileReader();
-                reader.onload  = ev => {
+                const reader = new FileReader();
+                reader.onload = ev => {
                     preview.innerHTML = `<img src="${ev.target.result}" alt="元画像プレビュー">`;
                 };
                 reader.readAsDataURL(showFile);
@@ -73,64 +110,107 @@
             }
         });
 
+        // 送信ボタン押下時の処理: 画像を送信して前処理・識別
         uploadForm.addEventListener('submit', async e => {
             e.preventDefault();
             if (!imageInput.files[0]) return;
 
             spinner.style.display = 'flex';
             identifyBtn.disabled  = true;
+            feedbackForm.style.display = 'none';
 
             try {
+                // HEIC 変換
                 let file = await autoConvertImageIfHeic(imageInput.files[0]);
                 const formData = new FormData();
                 formData.append('image', file);
 
-                /* Preprocess */
-                const preResp = await fetch('/preprocess-image', { method:'POST', body:formData });
+                /* --- 前処理 --- */
+                const preResp = await fetch('/preprocess-image', { method: 'POST', body: formData });
                 const preData = await preResp.json();
+                // 処理後のプレビュー表示
                 processedPreview.innerHTML = `<img src="${preData.processed_image}" alt="処理後プレビュー">`;
 
-                /* Identify */
-                const idResp = await fetch('/identify-badge', { method:'POST', body:formData });
+                /* --- バッジ識別 --- */
+                const idResp = await fetch('/identify-badge', { method: 'POST', body: formData });
                 const idData = await idResp.json();
 
-                const fields = [
-                    ['一致状況',    idData.matched ? '✅ データベースに存在します' : 'おめでとうございます！このバッジを初めて発見した方です。'],
-                    /* ['画像ハッシュ', idData.image_hash], */
-                    ['出典作品',    idData.source_work],
-                    ['キャラクター', idData.character],
-                    ['購入方法',    idData.purchase_method],
-                    ['推奨価格',    idData.suggested_price],
-                    ['オークション説明', idData.auction_description]
-                ];
-
+                // 結果エリアをクリア
                 resultDiv.innerHTML = '';
-                fields.forEach(([label, value], idx) => {
-                    const fid = `field${idx}`;
-                    const fieldDiv = document.createElement('div');
-                    fieldDiv.className = 'field';
-                    fieldDiv.innerHTML = `
-                        <span class="field-label">${label}：</span>
-                        <span class="field-value" id="${fid}">${value}</span>
-                    `;
-                    resultDiv.appendChild(fieldDiv);
-                });
 
-                document.querySelectorAll('#result .field-value').forEach(span => {
-                    span.addEventListener('click', async () => {
-                        try {
-                            await navigator.clipboard.writeText(span.innerText);
-                            span.style.opacity = 0.4;
-                            setTimeout(() => (span.style.opacity = ''), 300);
-                        } catch {}
+                if (idData.matched) {
+                    // 一致した場合: 結果をテーブル形式で表示
+                    const fields = [
+                        ['一致状況',    '✅ データベースに存在します'],
+                        ['出典作品',    idData.source_work],
+                        ['キャラクター', idData.character],
+                        ['購入方法',    idData.purchase_method],
+                        ['推奨価格',    idData.suggested_price],
+                        ['オークション説明', idData.auction_description]
+                    ];
+                    fields.forEach(([label, value], idx) => {
+                        const fid = `field${idx}`;
+                        const fieldDiv = document.createElement('div');
+                        fieldDiv.className = 'field';
+                        fieldDiv.innerHTML = `
+                            <span class="field-label">${label}：</span>
+                            <span class="field-value" id="${fid}">${value}</span>
+                        `;
+                        resultDiv.appendChild(fieldDiv);
                     });
-                });
+                    // 各項目の値をクリックするとクリップボードにコピー
+                    document.querySelectorAll('#result .field-value').forEach(span => {
+                        span.addEventListener('click', async () => {
+                            try {
+                                await navigator.clipboard.writeText(span.innerText);
+                                span.style.opacity = 0.4;
+                                setTimeout(() => (span.style.opacity = ''), 300);
+                            } catch {
+                                // クリップボード API が使えない場合は無視
+                            }
+                        });
+                    });
+                } else {
+                    // 一致しない場合: ユーモラスなメッセージを表示し、情報提供フォームを表示
+                    resultDiv.innerHTML = '<p>うーん、このバッジはちょっと珍しいようです。もしかしたら本当にレア物か、またはAIが休憩中かもしれません。別の画像を試してみてください😊</p>';
+                    // ハッシュとヒストグラムを隠しフィールドにセット
+                    feedbackHash.value = idData.image_hash;
+                    feedbackHist.value = JSON.stringify(idData.color_hist);
+                    // フォームを表示
+                    feedbackForm.style.display = 'block';
+                }
             } catch (err) {
                 resultDiv.innerHTML = `<p style="color:red;">${err.message}</p>`;
                 console.error(err);
             } finally {
                 spinner.style.display = 'none';
                 identifyBtn.disabled  = false;
+            }
+        });
+
+        // 送信ボタン押下時の処理: フィードバック送信
+        document.getElementById('submitFeedbackBtn').addEventListener('click', async () => {
+            const formData = new FormData();
+            // 隠しフィールドと入力内容を追加
+            formData.append('image_hash', feedbackHash.value);
+            formData.append('color_hist', feedbackHist.value);
+            formData.append('source_work', document.getElementById('sourceWorkInput').value);
+            formData.append('character', document.getElementById('characterInput').value);
+            formData.append('purchase_method', document.getElementById('purchaseMethodInput').value);
+            formData.append('suggested_price', document.getElementById('suggestedPriceInput').value);
+            formData.append('auction_description', document.getElementById('auctionDescriptionInput').value);
+            try {
+                const resp = await fetch('/feedback', { method: 'POST', body: formData });
+                const data = await resp.json();
+                if (data.status === 'success') {
+                    resultDiv.innerHTML = '<p>ご協力ありがとうございます！提供いただいた情報を登録しました。</p>';
+                    feedbackForm.style.display = 'none';
+                } else {
+                    resultDiv.innerHTML = '<p style="color:red;">送信に失敗しました。もう一度お試しください。</p>';
+                }
+            } catch (err) {
+                console.error(err);
+                resultDiv.innerHTML = '<p style="color:red;">エラーが発生しました。後で再試行してください。</p>';
             }
         });
     </script>
