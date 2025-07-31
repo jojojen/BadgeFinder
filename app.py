@@ -8,10 +8,13 @@ import cv2
 import logging
 from scipy.fftpack import dct
 import requests
+from requests.exceptions import Timeout  # import Timeout exception for handling request timeouts
 from dotenv import load_dotenv
 import psycopg2
 from urllib.parse import urlparse
 import time
+
+from utils import preprocess_image, resize_if_large, fdns_hash, compute_hsv_histogram
 
 load_dotenv()
 
@@ -63,6 +66,16 @@ def init_db():
         );
         """
     )
+    # Create a separate table to store images that Grok failed to classify
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS failed_grok (
+            id         SERIAL PRIMARY KEY,
+            image_hash TEXT,
+            base64     TEXT
+        );
+        """
+    )
     conn.commit()
     conn.close()
     logger.info("Database initialized.")
@@ -81,122 +94,13 @@ COLOR_SCORE_DIST_THRESHOLD_2 = float(os.environ.get("COLOR_SCORE_DIST_THRESHOLD_
 COLOR_SCORE_CORR_THRESHOLD_2 = float(os.environ.get("COLOR_SCORE_CORR_THRESHOLD_2", 0.92))
 GROK_API_TIMEOUT = int(os.environ.get("GROK_API_TIMEOUT", 15))
 
-# === 一次性列出與超時相關的環境設定
 logger.info("GROK timeout=%ss | payload max_tokens=%s | API=%s", GROK_API_TIMEOUT, os.environ.get("GROK_MAX_TOKENS", 1024), GROK_API_URL)
 
 # ------------------------------------------------------------------
 # Image hashing & helpers
 # ------------------------------------------------------------------
-
-def resize_if_large(img, max_side=1024):
-    """Resize image if any side > max_side (keep aspect ratio)."""
-    h, w = img.shape[:2]
-    if max(h, w) > max_side:
-        scale = max_side / max(h, w)
-        new_size = (int(w * scale), int(h * scale))
-        logger.info(f"Resizing large image from ({w},{h}) to {new_size}")
-        return cv2.resize(img, new_size, interpolation=cv2.INTER_AREA)
-    logger.info(f"No resize needed for image size ({w},{h})")
-    return img
-
-def fdns_hash(image: Image.Image, hash_size: int = 12, block_size: int = 16) -> str:
-    """Generate perceptual hash for the image."""
-    logger.debug("Calculating perceptual hash for image.")
-    img = image.convert("L").resize((hash_size * block_size, hash_size * block_size), Image.Resampling.LANCZOS)
-    pixels = np.asarray(img, dtype=np.float32)
-    pixels -= pixels.mean()
-    blocks = []
-    for row in range(0, pixels.shape[0], block_size):
-        for col in range(0, pixels.shape[1], block_size):
-            patch = pixels[row : row + block_size, col : col + block_size]
-            dct_block = dct(dct(patch.T, norm="ortho").T, norm="ortho")
-            dc = dct_block[0, 0]
-            ac = np.abs(dct_block[1:, 1:]).mean()
-            blocks.append((dc, ac))
-    dcs = np.array([b[0] for b in blocks])
-    acs = np.array([b[1] for b in blocks])
-    median_dc = np.median(dcs)
-    median_ac = np.median(acs)
-    bits = [(dc > median_dc or ac > median_ac) for dc, ac in blocks]
-    bits = np.array(bits).astype(int)
-    hash_value = 0
-    for bit in bits:
-        hash_value = (hash_value << 1) | int(bit)
-    hex_str = format(hash_value, f"0{(hash_size * hash_size) // 4}x")
-    assert all(c in "0123456789abcdef" for c in hex_str), f"Invalid hex hash: {hex_str}"
-    logger.debug("Image hash generated: %s", hex_str)
-    return hex_str
-
-def compute_hsv_histogram(image_bgr, hist_size: int = 32):
-    """Compute and return the normalized HSV histogram for the image."""
-    hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
-    h_hist = cv2.calcHist([hsv], [0], None, [hist_size], [0, 180])
-    h_hist = cv2.normalize(h_hist, h_hist).flatten()
-    logger.debug("Computed HSV histogram: %s...", h_hist[:5])
-    return h_hist.tolist()
-
-def preprocess_image(image_file):
-    """
-    Preprocess uploaded image, resize if too large, crop to badge, 
-    resize to 256x256, return hash/histogram.
-    """
-    logger.debug("Starting image preprocessing")
-    image_file.seek(0)
-    img_bytes = image_file.read()
-    img_array = np.frombuffer(img_bytes, np.uint8)
-    img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-    if img is None:
-        logger.error("Failed to decode image")
-        raise ValueError("Failed to decode image")
-    logger.debug("Image decoded: shape %s", img.shape)
-
-    # Resize if the image is too large (for example, smartphone photo)
-    img = resize_if_large(img, max_side=1024)
-
-    # Circle detection (assume badge is circular)
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    gray_blur = cv2.medianBlur(gray, 5)
-    circles = cv2.HoughCircles(
-        gray_blur,
-        cv2.HOUGH_GRADIENT,
-        dp=1.2,
-        minDist=100,
-        param1=100,
-        param2=30,
-        minRadius=100,
-        maxRadius=600,
-    )
-    if circles is None:
-        logger.error("No circular badge found")
-        raise ValueError("No circular badge found")
-    circles = np.round(circles[0, :]).astype("int")
-    x, y, r = circles[0]
-    logger.debug("Circle found: center=(%s,%s), radius=%s", x, y, r)
-
-    # Mask and crop badge
-    mask = np.zeros_like(img)
-    cv2.circle(mask, (x, y), r, (255, 255, 255), -1)
-    masked = cv2.bitwise_and(img, mask)
-    x1, y1, x2, y2 = max(x - r, 0), max(y - r, 0), min(x + r, img.shape[1]), min(y + r, img.shape[0])
-    cropped = masked[y1:y2, x1:x2]
-    logger.info(f"Cropped badge region shape: {cropped.shape}")
-
-    img_resized = cv2.resize(cropped, (256, 256), interpolation=cv2.INTER_LANCZOS4)
-    pil_img = Image.fromarray(cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB))
-    logger.info("Preprocessing: Calculating hash")
-    hash_value = fdns_hash(pil_img)
-    logger.info("Preprocessing: Calculating HSV histogram")
-    hist_value = compute_hsv_histogram(img_resized)
-
-    logger.info("Generated hash: %s", hash_value)
-    logger.debug("HSV histogram sample: %s...", hist_value[:5])
-
-    _, jpeg_data = cv2.imencode(".jpg", img_resized)
-    resized_bytes = jpeg_data.tobytes()
-    _, png_data = cv2.imencode(".png", img_resized)
-    base64_img = base64.b64encode(png_data.tobytes()).decode("utf-8")
-
-    return hash_value, base64_img, resized_bytes, hist_value
+# The implementations of resize_if_large, fdns_hash, compute_hsv_histogram and
+# preprocess_image have been moved to utils.py. They are imported above.
 
 # ------------------------------------------------------------------
 # Grok API
@@ -231,23 +135,51 @@ def call_grok_api(image_bytes):
     headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
     try:
         logger.debug("POST %s, payload size=%s bytes", GROK_API_URL, len(json.dumps(payload)))
+        # First attempt with configured timeout
         response = requests.post(GROK_API_URL, json=payload, headers=headers, timeout=GROK_API_TIMEOUT)
-        logger.debug("Grok HTTP status: %s | time %.2fs", response.status_code, time.time()-start_grok)
+        logger.debug("Grok HTTP status: %s | time %.2fs", response.status_code, time.time() - start_grok)
+    except Timeout:
+        # If the first request times out, log a warning and retry once with a longer timeout
+        logger.warning(
+            "Grok API timeout after %s seconds, retrying once with %s seconds", GROK_API_TIMEOUT, GROK_API_TIMEOUT * 2
+        )
+        try:
+            response = requests.post(
+                GROK_API_URL,
+                json=payload,
+                headers=headers,
+                timeout=GROK_API_TIMEOUT * 2,
+            )
+            logger.debug(
+                "Grok retry HTTP status: %s | time %.2fs", response.status_code, time.time() - start_grok
+            )
+        except Exception as retry_exc:
+            # If the retry also fails, return None
+            logger.error(
+                "Grok API retry failed after %.2fs: %s", time.time() - start_grok, retry_exc
+            )
+            return None
+    except Exception as e:
+        # For other exceptions (e.g., network errors), return None
+        logger.error("Grok API request failed after %.2fs: %s", time.time() - start_grok, e)
+        return None
+    try:
         response.raise_for_status()
         result = response.json()
-        logger.info("Grok API response JSON parsed in %.2fs", time.time()-start_grok)
+        logger.info("Grok API response JSON parsed in %.2fs", time.time() - start_grok)
         content = result["choices"][0]["message"]["content"]
         logger.debug("Grok full JSON preview=%s…", json.dumps(result)[:400])
         logger.debug("Grok raw content: %s", content)
         try:
             parsed_result = json.loads(content)
-            logger.info("Parsed Grok JSON successfully (%.2fs)", time.time()-start_grok)
+            logger.info("Parsed Grok JSON successfully (%.2fs)", time.time() - start_grok)
         except json.JSONDecodeError:
-            logger.error("Failed to parse Grok API content as JSON (%.2fs)", time.time()-start_grok)
+            logger.error("Failed to parse Grok API content as JSON (%.2fs)", time.time() - start_grok)
             parsed_result = {}
         return parsed_result
     except Exception as e:
-        logger.error("Grok API request failed after %.2fs: %s", time.time()-start_grok, e)
+        # Catch JSON parsing or status errors
+        logger.error("Grok API response processing failed after %.2fs: %s", time.time() - start_grok, e)
         return None
 
 # ------------------------------------------------------------------
@@ -275,13 +207,14 @@ def preprocess_image_api():
 
 @app.route("/identify-badge", methods=["POST"])
 def identify_badge():
-    """Identify badge: try DB, fallback to Grok API, write result."""
+    """Identify badge: try DB, fallback to Grok, and record failures."""
     request_start = time.time()                              
     if "image" not in request.files:
         logger.error("No image provided for identification.")
         return jsonify({"error": "No image provided"}), 400
     image_file = request.files["image"]
-    image_hash, _, resized_bytes, input_hist = preprocess_image(image_file)
+    # Preprocess the image and capture the base64 representation for potential storage
+    image_hash, base64_img, resized_bytes, input_hist = preprocess_image(image_file)
     logger.info("Computed hash for input image: %s", image_hash)
     conn = get_conn()
     cur = conn.cursor()
@@ -297,7 +230,7 @@ def identify_badge():
         return cv2.compareHist(h1, h2, cv2.HISTCMP_CORREL)
     best_match = None
     best_score = -1
-    loop_start = time.time()                                 
+    loop_start = time.time()                                
     for row in rows:
         stored_hash = row[1]
         if len(stored_hash) != len(image_hash):
@@ -339,23 +272,110 @@ def identify_badge():
                 "matched": True,
             }
         )
-    # Not found → call Grok API
+    # Not found → calling Grok API; if Grok fails, store the hash and base64
     logger.info("❌ No match found → calling Grok API for image hash: %s", image_hash)
     grok_result = call_grok_api(resized_bytes)
     logger.debug("Grok result: %s", grok_result)
-    # Fallback values
-    source_work = "[unknown]"
-    character = "[unknown]"
-    purchase_method = "[unknown]"
-    suggested_price = "[unknown]"
-    auction_description = "[unknown]"
     if grok_result:
+        # If Grok returned a result, extract fields and insert into badges
         source_work = grok_result.get("source_work", "[unknown]")
         character = grok_result.get("character", "[unknown]")
         purchase_method = grok_result.get("purchase_method", "[unknown]")
         suggested_price = grok_result.get("suggested_price", "[unknown]")
         auction_description = grok_result.get("auction_description", "[unknown]")
         logger.info("Inserting Grok result into DB for hash %s.", image_hash)
+        try:
+            cur.execute(
+                """
+                INSERT INTO badges (
+                    image_hash, source_work, character, purchase_method,
+                    suggested_price, auction_description, color_hist
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (image_hash) DO UPDATE SET
+                    source_work         = EXCLUDED.source_work,
+                    character           = EXCLUDED.character,
+                    purchase_method     = EXCLUDED.purchase_method,
+                    suggested_price     = EXCLUDED.suggested_price,
+                    auction_description = EXCLUDED.auction_description,
+                    color_hist          = EXCLUDED.color_hist
+                """,
+                (
+                    image_hash,
+                    source_work,
+                    character,
+                    purchase_method,
+                    suggested_price,
+                    auction_description,
+                    json.dumps(input_hist),
+                ),
+            )
+            conn.commit()
+        except Exception as e:
+            logger.error("Failed to insert Grok result for hash %s: %s", image_hash, e)
+            conn.rollback()
+        conn.close()
+        logger.debug("Total identify_badge time %.2fs (from start)", time.time()-request_start)
+        return jsonify(
+            {
+                "image_hash": image_hash,
+                "source_work": source_work,
+                "character": character,
+                "purchase_method": purchase_method,
+                "suggested_price": suggested_price,
+                "auction_description": auction_description,
+                "matched": False,
+            }
+        )
+    # Grok did not return a valid result → insert into failed_grok and request feedback
+    logger.warning("Grok API did not return a valid result. Storing image_hash and base64 in failed_grok.")
+    try:
+        cur.execute(
+            "INSERT INTO failed_grok (image_hash, base64) VALUES (%s, %s)",
+            (image_hash, base64_img),
+        )
+        conn.commit()
+    except Exception as e:
+        logger.error("Failed to insert failed_grok record for hash %s: %s", image_hash, e)
+        conn.rollback()
+    conn.close()
+    logger.debug("Total identify_badge time %.2fs (from start)", time.time()-request_start)  
+    return jsonify(
+        {
+            "image_hash": image_hash,
+            "color_hist": input_hist,
+            "matched": False,
+        }
+    )
+
+# ------------------------------------------------------------------
+# Feedback endpoint
+# ------------------------------------------------------------------
+@app.route("/feedback", methods=["POST"])
+def feedback():
+    """Accept user feedback to insert a new badge entry into the database.
+
+    When the identify_badge endpoint does not find a match, the front‑end will
+    prompt the user to enter information about the badge. This endpoint
+    receives that data and writes it to the database. All fields are optional
+    except the image_hash and color_hist, which are required to uniquely
+    identify the badge and store its color histogram.
+
+    Returns a JSON response indicating success or error.
+    """
+    image_hash = request.form.get("image_hash")
+    color_hist_str = request.form.get("color_hist")
+    if not image_hash or not color_hist_str:
+        return jsonify({"error": "Missing image_hash or color_hist"}), 400
+    source_work = request.form.get("source_work", "[unknown]")
+    character = request.form.get("character", "[unknown]")
+    purchase_method = request.form.get("purchase_method", "[unknown]")
+    suggested_price = request.form.get("suggested_price", "[unknown]")
+    auction_description = request.form.get("auction_description", "[unknown]")
+    # Insert or update the badge entry using user feedback
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
         cur.execute(
             """
             INSERT INTO badges (
@@ -378,25 +398,17 @@ def identify_badge():
                 purchase_method,
                 suggested_price,
                 auction_description,
-                json.dumps(input_hist),
+                color_hist_str,
             ),
         )
         conn.commit()
-    else:
-        logger.warning("Grok API did not return a valid result. Inserting [unknown].")
+    except Exception as e:
+        logger.error("Failed to insert feedback for hash %s: %s", image_hash, e)
+        conn.rollback()
+        conn.close()
+        return jsonify({"error": "Database error"}), 500
     conn.close()
-    logger.debug("Total identify_badge time %.2fs (from start)", time.time()-request_start)  
-    return jsonify(
-        {
-            "image_hash": image_hash,
-            "source_work": source_work,
-            "character": character,
-            "purchase_method": purchase_method,
-            "suggested_price": suggested_price,
-            "auction_description": auction_description,
-            "matched": False,
-        }
-    )
+    return jsonify({"status": "success"})
 
 # ------------------------------------------------------------------
 # Local testing entry-point
