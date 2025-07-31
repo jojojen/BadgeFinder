@@ -137,8 +137,8 @@
                         ['一致状況',    '✅ データベースに存在します'],
                         ['出典作品',    idData.source_work],
                         ['キャラクター', idData.character],
-                        ['購入方法',    idData.purchase_method],
-                        ['推奨価格',    idData.suggested_price],
+                        ['購入方法',    idData.purchase_channel],
+                        ['入手難度',    idData.acquisition_difficulty],
                         ['オークション説明', idData.auction_description]
                     ];
                     fields.forEach(([label, value], idx) => {
@@ -171,8 +171,8 @@
                             ['一致状況',    '🎉 おめでとうございます！このバッジを初めて発見した方です。'],
                             ['出典作品',    idData.source_work],
                             ['キャラクター', idData.character],
-                            ['購入方法',    idData.purchase_method],
-                            ['推奨価格',    idData.suggested_price],
+                            ['購入方法',    idData.purchase_channel],
+                            ['入手難度',    idData.acquisition_difficulty],
                             ['オークション説明', idData.auction_description]
                         ];
                         fields.forEach(([label, value], idx) => {
@@ -223,8 +223,8 @@
             formData.append('color_hist', feedbackHist.value);
             formData.append('source_work', document.getElementById('sourceWorkInput').value);
             formData.append('character', document.getElementById('characterInput').value);
-            formData.append('purchase_method', document.getElementById('purchaseMethodInput').value);
-            formData.append('suggested_price', document.getElementById('suggestedPriceInput').value);
+            formData.append('purchase_channel', document.getElementById('purchaseMethodInput').value);
+            formData.append('acquisition_difficulty', document.getElementById('suggestedPriceInput').value);
             formData.append('auction_description', document.getElementById('auctionDescriptionInput').value);
             try {
                 const resp = await fetch('/feedback', { method: 'POST', body: formData });
