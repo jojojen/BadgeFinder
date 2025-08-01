@@ -59,7 +59,6 @@ def init_db():
             image_hash      TEXT UNIQUE,
             source_work     TEXT,
             character       TEXT,
-            purchase_channel TEXT,
             acquisition_difficulty TEXT,
             auction_description TEXT,
             color_hist      TEXT
@@ -116,7 +115,7 @@ def call_grok_api(image_bytes):
     grok_prompt      = os.environ.get(
         "GROK_PROMPT",
         '只要用日文回傳以下 JSON 格式，不要有解釋，也不要有其他文字：'
-        '{"source_work":"", "character":"", "purchase_channel":"", "acquisition_difficulty":"", "auction_description":""}',
+        '{"source_work":"", "character":"", "acquisition_difficulty":"", "auction_description":""}',
     )
     payload = {
         "model": grok_model,
@@ -266,9 +265,8 @@ def identify_badge():
                 "image_hash": image_hash,
                 "source_work": best_match[2],
                 "character": best_match[3],
-                "purchase_channel": best_match[4],
-                "acquisition_difficulty": best_match[5],
-                "auction_description": best_match[6],
+                "acquisition_difficulty": best_match[4],
+                "auction_description": best_match[5],
                 "matched": True,
             }
         )
@@ -280,7 +278,6 @@ def identify_badge():
         # If Grok returned a result, extract fields and insert into badges
         source_work = grok_result.get("source_work", "[unknown]")
         character = grok_result.get("character", "[unknown]")
-        purchase_channel = grok_result.get("purchase_channel", "[unknown]")
         acquisition_difficulty = grok_result.get("acquisition_difficulty", "[unknown]")
         auction_description = grok_result.get("auction_description", "[unknown]")
         logger.info("Inserting Grok result into DB for hash %s.", image_hash)
@@ -288,14 +285,13 @@ def identify_badge():
             cur.execute(
                 """
                 INSERT INTO badges (
-                    image_hash, source_work, character, purchase_channel,
+                    image_hash, source_work, character,
                     acquisition_difficulty, auction_description, color_hist
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT (image_hash) DO UPDATE SET
                     source_work         = EXCLUDED.source_work,
                     character           = EXCLUDED.character,
-                    purchase_channel     = EXCLUDED.purchase_channel,
                     acquisition_difficulty     = EXCLUDED.acquisition_difficulty,
                     auction_description = EXCLUDED.auction_description,
                     color_hist          = EXCLUDED.color_hist
@@ -304,7 +300,6 @@ def identify_badge():
                     image_hash,
                     source_work,
                     character,
-                    purchase_channel,
                     acquisition_difficulty,
                     auction_description,
                     json.dumps(input_hist),
@@ -321,7 +316,6 @@ def identify_badge():
                 "image_hash": image_hash,
                 "source_work": source_work,
                 "character": character,
-                "purchase_channel": purchase_channel,
                 "acquisition_difficulty": acquisition_difficulty,
                 "auction_description": auction_description,
                 "matched": False,
@@ -369,7 +363,6 @@ def feedback():
         return jsonify({"error": "Missing image_hash or color_hist"}), 400
     source_work = request.form.get("source_work", "[unknown]")
     character = request.form.get("character", "[unknown]")
-    purchase_channel = request.form.get("purchase_channel", "[unknown]")
     acquisition_difficulty = request.form.get("acquisition_difficulty", "[unknown]")
     auction_description = request.form.get("auction_description", "[unknown]")
     # Insert or update the badge entry using user feedback
@@ -379,15 +372,13 @@ def feedback():
         cur.execute(
             """
             INSERT INTO badges (
-                image_hash, source_work, character, purchase_channel,
+                image_hash, source_work, character,
                 acquisition_difficulty, auction_description, color_hist
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s)
             ON CONFLICT (image_hash) DO UPDATE SET
                 source_work         = EXCLUDED.source_work,
                 character           = EXCLUDED.character,
-                purchase_channel     = EXCLUDED.purchase_channel,
-                acquisition_difficulty     = EXCLUDED.acquisition_difficulty,
                 auction_description = EXCLUDED.auction_description,
                 color_hist          = EXCLUDED.color_hist
             """,
@@ -395,7 +386,6 @@ def feedback():
                 image_hash,
                 source_work,
                 character,
-                purchase_channel,
                 acquisition_difficulty,
                 auction_description,
                 color_hist_str,
