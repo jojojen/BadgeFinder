@@ -10,20 +10,27 @@
 <body>
     <h1>バッジ識別サービス</h1>
     <div class="container">
+        <!-- File-select & action buttons -->
         <form id="uploadForm">
             <input type="file" id="image" accept="image/*,.heic,.heif" required>
-            <button type="submit" id="identifyBtn">識別開始</button>
+            <!-- Step 1: Preprocess only -->
+            <button type="button" id="preprocessBtn">前処理開始</button>
+            <!-- Step 2: Identify (disabled until preprocess finishes) -->
+            <button type="button" id="identifyBtn" disabled>識別開始</button>
         </form>
+
+        <!-- Previews -->
         <div class="preview-container">
             <div id="preview" class="preview-box"></div>
             <div id="processed-preview" class="preview-box"></div>
         </div>
-        <!-- Result display area -->
+
+        <!-- Result area -->
         <div id="result"></div>
-        <!-- Feedback form shown when identification fails -->
+
+        <!-- Feedback form (shown only when Grok fails) -->
         <div id="feedbackForm" style="display: none; margin-top: 1rem;">
             <h2>情報提供のお願い</h2>
-            <!-- Hidden fields to store hash and histogram -->
             <input type="hidden" id="feedbackHash">
             <input type="hidden" id="feedbackHist">
             <div>
@@ -33,27 +40,24 @@
                 <label>キャラクター: <input type="text" id="characterInput" placeholder="例: キャラクター名"></label>
             </div>
             <div>
-                <label>購入方法: <input type="text" id="purchaseMethodInput" placeholder="例: ガチャ/通販など"></label>
-            </div>
-            <div>
-                <label>推奨価格: <input type="text" id="suggestedPriceInput" placeholder="例: 1000円"></label>
-            </div>
-            <div>
-                <label>オークション説明: <textarea id="auctionDescriptionInput" rows="3" placeholder="その他の情報"></textarea></label>
+                <label>アイテム解説: <textarea id="auctionDescriptionInput" rows="3" placeholder="その他の情報"></textarea></label>
             </div>
             <button type="button" id="submitFeedbackBtn">送信</button>
         </div>
     </div>
-    <!-- Spinner overlay shown during processing -->
+
+    <!-- Spinner overlay -->
     <div class="spinner-overlay" id="spinnerOverlay">
         <div class="spinner"></div>
     </div>
 
-    <!-- heic2any library for HEIC/HEIF conversion -->
+    <!-- heic2any library -->
     <script src="https://cdn.jsdelivr.net/npm/heic2any/dist/heic2any.min.js"></script>
 
     <script>
-        /* --- HEIC/HEIF auto convert to PNG (iOS photo fix) --- */
+        /* ---------- Utilities ---------- */
+
+        // Auto-convert HEIC/HEIF to PNG so iOS photos preview & upload correctly
         async function autoConvertImageIfHeic(file) {
             const isHeic = (
                 file.type === "image/heic" ||
@@ -65,7 +69,7 @@
 
             try {
                 let converted = await heic2any({ blob: file, toType: "image/png" });
-                if (Array.isArray(converted)) converted = converted[0];
+                if (Array.isArray(converted)) converted = converted[0]; // heic2any may return array
                 return new File([converted], file.name.replace(/\.(heic|heif)$/i, ".png"), { type: "image/png" });
             } catch (err) {
                 console.error("HEIC convert failed.", err);
@@ -73,21 +77,26 @@
             }
         }
 
+        /* ---------- DOM refs ---------- */
         const imageInput       = document.getElementById('image');
         const preview          = document.getElementById('preview');
         const processedPreview = document.getElementById('processed-preview');
         const resultDiv        = document.getElementById('result');
-        const uploadForm       = document.getElementById('uploadForm');
+        const preprocessBtn    = document.getElementById('preprocessBtn');
         const identifyBtn      = document.getElementById('identifyBtn');
         const spinner          = document.getElementById('spinnerOverlay');
         const feedbackForm     = document.getElementById('feedbackForm');
         const feedbackHash     = document.getElementById('feedbackHash');
         const feedbackHist     = document.getElementById('feedbackHist');
 
-        // Show preview of selected image (and convert HEIC if necessary)
+        /* ---------- Image preview ---------- */
         imageInput.addEventListener('change', async e => {
+            // Clear previous state
             preview.innerHTML = processedPreview.innerHTML = resultDiv.innerHTML = '';
             feedbackForm.style.display = 'none';
+            identifyBtn.disabled = true;          // Must preprocess again
+            preprocessBtn.disabled = false;
+
             const file = e.target.files[0];
             if (!file) return;
 
@@ -104,35 +113,56 @@
             }
         });
 
-        // Handle form submission: preprocess and identify badge
-        uploadForm.addEventListener('submit', async e => {
-            e.preventDefault();
+        /* ---------- Step 1: Preprocess ---------- */
+        preprocessBtn.addEventListener('click', async () => {
             if (!imageInput.files[0]) return;
 
             spinner.style.display = 'flex';
-            identifyBtn.disabled  = true;
-            feedbackForm.style.display = 'none';
+            preprocessBtn.disabled = true;
+            identifyBtn.disabled   = true;  // Keep disabled until success
 
             try {
-                // Convert HEIC if necessary
                 let file = await autoConvertImageIfHeic(imageInput.files[0]);
                 const formData = new FormData();
                 formData.append('image', file);
 
-                /* Preprocess image */
                 const preResp = await fetch('/preprocess-image', { method:'POST', body: formData });
                 const preData = await preResp.json();
+
                 processedPreview.innerHTML = `<img src="${preData.processed_image}" alt="処理後プレビュー">`;
 
-                /* Identify badge */
+                // Enable next step
+                identifyBtn.disabled = false;
+            } catch (err) {
+                processedPreview.innerHTML = `<p style="color:red;">${err.message}</p>`;
+                console.error(err);
+                preprocessBtn.disabled = false; // Allow retry
+            } finally {
+                spinner.style.display = 'none';
+            }
+        });
+
+        /* ---------- Step 2: Identify ---------- */
+        identifyBtn.addEventListener('click', async () => {
+            if (identifyBtn.disabled || !imageInput.files[0]) return;
+
+            spinner.style.display = 'flex';
+            identifyBtn.disabled  = true;
+
+            try {
+                let file = await autoConvertImageIfHeic(imageInput.files[0]);
+                const formData = new FormData();
+                formData.append('image', file);
+
                 const idResp = await fetch('/identify-badge', { method:'POST', body: formData });
                 const idData = await idResp.json();
 
-                // Clear previous results
+                // Clear previous result
                 resultDiv.innerHTML = '';
+                feedbackForm.style.display = 'none';
 
+                /* ----- Render identification result ----- */
                 if (idData.matched) {
-                    // Existing badge found in DB: display status and metadata
                     const fields = [
                         ['一致状況',    '✅ データベースに存在します'],
                         ['出典作品',    idData.source_work],
@@ -140,68 +170,24 @@
                         ['入手難度',    idData.acquisition_difficulty],
                         ['アイテム解説', idData.auction_description]
                     ];
-                    fields.forEach(([label, value], idx) => {
-                        const fid = `field${idx}`;
-                        const fieldDiv = document.createElement('div');
-                        fieldDiv.className = 'field';
-                        fieldDiv.innerHTML = `
-                            <span class="field-label">${label}：</span>
-                            <span class="field-value" id="${fid}">${value}</span>
-                        `;
-                        resultDiv.appendChild(fieldDiv);
-                    });
-                    // Enable click-to-copy for each field value
-                    document.querySelectorAll('#result .field-value').forEach(span => {
-                        span.addEventListener('click', async () => {
-                            try {
-                                await navigator.clipboard.writeText(span.innerText);
-                                span.style.opacity = 0.4;
-                                setTimeout(() => (span.style.opacity = ''), 300);
-                            } catch {
-                                // Ignore failures to use clipboard API
-                            }
-                        });
-                    });
+                    renderFields(fields);
                 } else {
-                    // No existing match in DB: distinguish between Grok success and failure
                     if (idData.source_work !== undefined) {
-                        // Grok succeeded and returned metadata → first discovery
+                        // Grok succeeded → first discovery
                         const fields = [
                             ['一致状況',    '🎉 おめでとうございます！このバッジを初めて発見した方です。'],
                             ['出典作品',    idData.source_work],
                             ['キャラクター', idData.character],
                             ['入手難度',    idData.acquisition_difficulty],
-                            ['オークション説明', idData.auction_description]
+                            ['アイテム解説', idData.auction_description]
                         ];
-                        fields.forEach(([label, value], idx) => {
-                            const fid = `field${idx}`;
-                            const fieldDiv = document.createElement('div');
-                            fieldDiv.className = 'field';
-                            fieldDiv.innerHTML = `
-                                <span class="field-label">${label}：</span>
-                                <span class="field-value" id="${fid}">${value}</span>
-                            `;
-                            resultDiv.appendChild(fieldDiv);
-                        });
-                        // Enable click-to-copy
-                        document.querySelectorAll('#result .field-value').forEach(span => {
-                            span.addEventListener('click', async () => {
-                                try {
-                                    await navigator.clipboard.writeText(span.innerText);
-                                    span.style.opacity = 0.4;
-                                    setTimeout(() => (span.style.opacity = ''), 300);
-                                } catch {
-                                    // Ignore if clipboard API is unavailable
-                                }
-                            });
-                        });
+                        renderFields(fields);
                     } else {
-                        // Grok failed to return metadata → show humorous message and ask for user feedback
+                        // Grok failed → ask for feedback
                         resultDiv.innerHTML = '<p>うーん、このバッジはちょっと珍しいようです。もしかしたら本当にレア物か、またはAIが休憩中かもしれません。別の画像を試してみてください</p>';
-                        // Populate hidden inputs with hash and histogram for feedback
+                        // Store hash & histogram for feedback
                         feedbackHash.value = idData.image_hash;
                         feedbackHist.value = JSON.stringify(idData.color_hist);
-                        // Show feedback form
                         feedbackForm.style.display = 'block';
                     }
                 }
@@ -214,15 +200,41 @@
             }
         });
 
-        // Submit feedback to backend
+        /* ---------- Helper: render field list with copy-to-clipboard ---------- */
+        function renderFields(rows) {
+            rows.forEach(([label, value], idx) => {
+                const fid = `field${idx}`;
+                const fieldDiv = document.createElement('div');
+                fieldDiv.className = 'field';
+                fieldDiv.innerHTML = `
+                    <span class="field-label">${label}：</span>
+                    <span class="field-value" id="${fid}">${value}</span>
+                `;
+                resultDiv.appendChild(fieldDiv);
+            });
+            // Enable click-to-copy for each value
+            document.querySelectorAll('#result .field-value').forEach(span => {
+                span.style.cursor = 'pointer';
+                span.addEventListener('click', async () => {
+                    try {
+                        await navigator.clipboard.writeText(span.innerText);
+                        span.style.opacity = 0.4;
+                        setTimeout(() => (span.style.opacity = ''), 300);
+                    } catch {/* Ignore clipboard errors */}
+                });
+            });
+        }
+
+        /* ---------- Submit feedback to backend ---------- */
         document.getElementById('submitFeedbackBtn').addEventListener('click', async () => {
             const formData = new FormData();
             formData.append('image_hash', feedbackHash.value);
             formData.append('color_hist', feedbackHist.value);
             formData.append('source_work', document.getElementById('sourceWorkInput').value);
             formData.append('character', document.getElementById('characterInput').value);
-            formData.append('acquisition_difficulty', document.getElementById('suggestedPriceInput').value);
+            formData.append('acquisition_difficulty', document.getElementById('suggestedPriceInput')?.value || '');
             formData.append('auction_description', document.getElementById('auctionDescriptionInput').value);
+
             try {
                 const resp = await fetch('/feedback', { method: 'POST', body: formData });
                 const data = await resp.json();
