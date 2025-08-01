@@ -288,7 +288,7 @@ def identify_badge():
                     image_hash, source_work, character,
                     acquisition_difficulty, auction_description, color_hist
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT (image_hash) DO UPDATE SET
                     source_work         = EXCLUDED.source_work,
                     character           = EXCLUDED.character,
@@ -375,11 +375,10 @@ def feedback():
                 image_hash, source_work, character,
                 acquisition_difficulty, auction_description, color_hist
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s)
             ON CONFLICT (image_hash) DO UPDATE SET
                 source_work         = EXCLUDED.source_work,
                 character           = EXCLUDED.character,
-                acquisition_difficulty     = EXCLUDED.acquisition_difficulty,
                 auction_description = EXCLUDED.auction_description,
                 color_hist          = EXCLUDED.color_hist
             """,
