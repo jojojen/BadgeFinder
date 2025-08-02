@@ -172,7 +172,7 @@
                     ];
                     renderFields(fields);
                 } else {
-                    if (idData.source_work !== undefined) {
+                    if (idData.source_work && idData.source_work.trim() !== '') {
                         // Grok succeeded → first discovery
                         const fields = [
                             ['一致状況',    '🎉 おめでとうございます！このバッジを初めて発見した方です。'],
