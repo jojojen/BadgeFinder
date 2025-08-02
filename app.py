@@ -14,7 +14,7 @@ import psycopg2
 from urllib.parse import urlparse
 import time
 
-from utils import preprocess_image, resize_if_large, fdns_hash, compute_hsv_histogram
+from utils import preprocess_image, resize_if_large, fdns_hash, compute_hsv_histogram, upload_image
 
 load_dotenv()
 
@@ -61,7 +61,8 @@ def init_db():
             character       TEXT,
             acquisition_difficulty TEXT,
             auction_description TEXT,
-            color_hist      TEXT
+            color_hist      TEXT,
+            url             TEXT
         );
         """
     )
@@ -69,9 +70,10 @@ def init_db():
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS failed_grok (
-            id         SERIAL PRIMARY KEY,
-            image_hash TEXT,
-            base64     TEXT
+            id            SERIAL PRIMARY KEY,
+            image_hash    TEXT,
+            url           TEXT,
+            error_detail  TEXT
         );
         """
     )
@@ -153,15 +155,15 @@ def call_grok_api(image_bytes):
                 "Grok retry HTTP status: %s | time %.2fs", response.status_code, time.time() - start_grok
             )
         except Exception as retry_exc:
-            # If the retry also fails, return None
+            # If the retry also fails, return (None, None)
             logger.error(
                 "Grok API retry failed after %.2fs: %s", time.time() - start_grok, retry_exc
             )
-            return None
+            return None, None
     except Exception as e:
-        # For other exceptions (e.g., network errors), return None
+        # For other exceptions (e.g., network errors), return (None, None)
         logger.error("Grok API request failed after %.2fs: %s", time.time() - start_grok, e)
-        return None
+        return None, None
     try:
         response.raise_for_status()
         result = response.json()
@@ -172,14 +174,14 @@ def call_grok_api(image_bytes):
         try:
             parsed_result = json.loads(content)
             logger.info("Parsed Grok JSON successfully (%.2fs)", time.time() - start_grok)
+            return parsed_result, content
         except json.JSONDecodeError:
             logger.error("Failed to parse Grok API content as JSON (%.2fs)", time.time() - start_grok)
-            parsed_result = {}
-        return parsed_result
+            return None, content
     except Exception as e:
         # Catch JSON parsing or status errors
         logger.error("Grok API response processing failed after %.2fs: %s", time.time() - start_grok, e)
-        return None
+        return None, None
 
 # ------------------------------------------------------------------
 # Flask routes
@@ -191,15 +193,18 @@ def index():
 
 @app.route("/preprocess-image", methods=["POST"])
 def preprocess_image_api():
-    """Preprocess image endpoint: returns cropped badge and hash."""
+    """Preprocess image endpoint: returns cropped badge and hash with upload URL."""
     if "image" not in request.files:
         logger.error("No image provided for preprocessing.")
         return jsonify({"error": "No image provided"}), 400
     image_file = request.files["image"]
     try:
-        image_hash, base64_img, _, _ = preprocess_image(image_file)
+        # capture resized_bytes to upload
+        image_hash, base64_img, resized_bytes, _ = preprocess_image(image_file)
         logger.info("Preprocess success. Hash: %s", image_hash)
-        return jsonify({"processed_image": f"data:image/png;base64,{base64_img}", "image_hash": image_hash})
+        # upload preprocessed image to 0x0.st
+        url = upload_image(resized_bytes)
+        return jsonify({"processed_image": f"data:image/png;base64,{base64_img}", "image_hash": image_hash, "url": url})
     except Exception as e:
         logger.error("Preprocess error: %s", e)
         return jsonify({"error": str(e)}), 500
@@ -215,6 +220,11 @@ def identify_badge():
     # Preprocess the image and capture the base64 representation for potential storage
     image_hash, base64_img, resized_bytes, input_hist = preprocess_image(image_file)
     logger.info("Computed hash for input image: %s", image_hash)
+    existing_url = request.form.get("url")
+    if existing_url:
+        url_uploaded = existing_url
+    else:
+        url_uploaded = upload_image(resized_bytes)
     conn = get_conn()
     cur = conn.cursor()
     db_fetch_start = time.time()                             
@@ -260,6 +270,7 @@ def identify_badge():
         logger.info("✅ Match found: ID=%s | score=%s", best_match[0], best_score)
         conn.close()
         logger.debug("Total identify_badge time %.2fs (from start)", time.time()-request_start)  
+        db_url = best_match[8] if len(best_match) > 8 else None
         return jsonify(
             {
                 "image_hash": image_hash,
@@ -268,12 +279,13 @@ def identify_badge():
                 "acquisition_difficulty": best_match[4],
                 "auction_description": best_match[5],
                 "matched": True,
+                "url": db_url,
             }
         )
-    # Not found → calling Grok API; if Grok fails, store the hash and base64
+    # Not found → calling Grok API; if Grok fails, record error details and stored image
     logger.info("❌ No match found → calling Grok API for image hash: %s", image_hash)
-    grok_result = call_grok_api(resized_bytes)
-    logger.debug("Grok result: %s", grok_result)
+    grok_result, grok_raw = call_grok_api(resized_bytes)
+    logger.debug("Grok parsed result: %s", grok_result)
     if grok_result:
         # If Grok returned a result, extract fields and insert into badges
         source_work = grok_result.get("source_work", "[unknown]")
@@ -286,15 +298,16 @@ def identify_badge():
                 """
                 INSERT INTO badges (
                     image_hash, source_work, character,
-                    acquisition_difficulty, auction_description, color_hist
+                    acquisition_difficulty, auction_description, color_hist, url
                 )
-                VALUES (%s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (image_hash) DO UPDATE SET
                     source_work         = EXCLUDED.source_work,
                     character           = EXCLUDED.character,
                     acquisition_difficulty     = EXCLUDED.acquisition_difficulty,
                     auction_description = EXCLUDED.auction_description,
-                    color_hist          = EXCLUDED.color_hist
+                    color_hist          = EXCLUDED.color_hist,
+                    url                 = EXCLUDED.url
                 """,
                 (
                     image_hash,
@@ -303,6 +316,7 @@ def identify_badge():
                     acquisition_difficulty,
                     auction_description,
                     json.dumps(input_hist),
+                    url_uploaded,
                 ),
             )
             conn.commit()
@@ -319,14 +333,19 @@ def identify_badge():
                 "acquisition_difficulty": acquisition_difficulty,
                 "auction_description": auction_description,
                 "matched": False,
+                "url": url_uploaded,
             }
         )
     # Grok did not return a valid result → insert into failed_grok and request feedback
-    logger.warning("Grok API did not return a valid result. Storing image_hash and base64 in failed_grok.")
+    logger.warning("Grok API did not return a valid result. Storing image_hash, url and error detail in failed_grok.")
+    if grok_raw:
+        error_detail = f"length={len(grok_raw)} content={grok_raw[:200]}"
+    else:
+        error_detail = "No valid Grok response"
     try:
         cur.execute(
-            "INSERT INTO failed_grok (image_hash, base64) VALUES (%s, %s)",
-            (image_hash, base64_img),
+            "INSERT INTO failed_grok (image_hash, url, error_detail) VALUES (%s, %s, %s)",
+            (image_hash, url_uploaded, error_detail),
         )
         conn.commit()
     except Exception as e:
@@ -339,6 +358,7 @@ def identify_badge():
             "image_hash": image_hash,
             "color_hist": input_hist,
             "matched": False,
+            "url": url_uploaded,
         }
     )
 
@@ -365,6 +385,7 @@ def feedback():
     character = request.form.get("character", "[unknown]")
     acquisition_difficulty = request.form.get("acquisition_difficulty", "[unknown]")
     auction_description = request.form.get("auction_description", "[unknown]")
+    url_form = request.form.get("url")
     # Insert or update the badge entry using user feedback
     conn = get_conn()
     cur = conn.cursor()
@@ -373,14 +394,15 @@ def feedback():
             """
             INSERT INTO badges (
                 image_hash, source_work, character,
-                acquisition_difficulty, auction_description, color_hist
+                acquisition_difficulty, auction_description, color_hist, url
             )
-            VALUES (%s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (image_hash) DO UPDATE SET
                 source_work         = EXCLUDED.source_work,
                 character           = EXCLUDED.character,
                 auction_description = EXCLUDED.auction_description,
-                color_hist          = EXCLUDED.color_hist
+                color_hist          = EXCLUDED.color_hist,
+                url                 = COALESCE(EXCLUDED.url, badges.url)
             """,
             (
                 image_hash,
@@ -389,6 +411,7 @@ def feedback():
                 acquisition_difficulty,
                 auction_description,
                 color_hist_str,
+                url_form,
             ),
         )
         conn.commit()
