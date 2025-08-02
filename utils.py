@@ -150,3 +150,28 @@ def preprocess_image(image_file):
     base64_img = base64.b64encode(png_data.tobytes()).decode("utf-8")
 
     return hash_value, base64_img, resized_bytes, hist_value
+
+# ------------------------------------------------------------------
+# Image Upload Helper
+# ------------------------------------------------------------------
+def upload_image(image_bytes: bytes) -> str:
+    import requests
+    api_endpoint = "https://catbox.moe/user/api.php"
+    try:
+        logger.info("Uploading image to Catbox ({} bytes)".format(len(image_bytes)))
+        # Prepare multipart/form-data payload. `reqtype=fileupload` signals a file upload.
+        data = {"reqtype": "fileupload"}
+        files = {"fileToUpload": ("image.jpg", image_bytes)}
+        resp = requests.post(api_endpoint, data=data, files=files, timeout=15)
+        resp.raise_for_status()
+        url = resp.text.strip()
+        # Catbox may return additional text if something goes wrong; only accept valid URLs
+        if url.startswith("http"):
+            logger.info("Uploaded image successfully: %s", url)
+            return url
+        else:
+            logger.error("Unexpected response from Catbox: %s", url)
+            return None
+    except Exception as exc:
+        logger.error("Failed to upload image to Catbox: %s", exc)
+        return None
