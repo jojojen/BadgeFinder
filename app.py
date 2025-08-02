@@ -173,6 +173,7 @@ def call_grok_api(image_bytes):
             logger.error("Failed to parse Grok API content as JSON (%.2fs)", time.time() - start_grok)
             return None, content, preview
     except Exception as e:
+        # Catch JSON parsing or status errors
         logger.error("Grok API response processing failed after %.2fs: %s", time.time() - start_grok, e)
         return None, None, None
 
@@ -195,7 +196,7 @@ def preprocess_image_api():
         # capture resized_bytes to upload
         image_hash, base64_img, resized_bytes, _ = preprocess_image(image_file)
         logger.info("Preprocess success. Hash: %s", image_hash)
-        # upload preprocessed image to 0x0.st
+        # Upload the preprocessed image to the free hosting service
         url = upload_image(resized_bytes)
         return jsonify({"processed_image": f"data:image/png;base64,{base64_img}", "image_hash": image_hash, "url": url})
     except Exception as e:
@@ -204,7 +205,14 @@ def preprocess_image_api():
 
 @app.route("/identify-badge", methods=["POST"])
 def identify_badge():
-    """Identify badge: try DB, fallback to Grok, and record failures."""
+    """
+    Identify badge: try DB, fallback to Grok, and record failures.
+
+    If the request includes a ``url`` form field (from the `/preprocess-image` response), the
+    backend will use this URL directly rather than uploading the image again. This avoids
+    re‑uploading the same image multiple times. When no URL is provided, the resized image
+    is uploaded to the free host and the resulting URL is used for storage and responses.
+    """
     request_start = time.time()                              
     if "image" not in request.files:
         logger.error("No image provided for identification.")
@@ -213,6 +221,8 @@ def identify_badge():
     # Preprocess the image and capture the base64 representation for potential storage
     image_hash, base64_img, resized_bytes, input_hist = preprocess_image(image_file)
     logger.info("Computed hash for input image: %s", image_hash)
+    # If the client already has a hosted URL (from /preprocess-image), reuse it and avoid
+    # uploading again. Otherwise upload the resized image now.
     existing_url = request.form.get("url")
     if existing_url:
         url_uploaded = existing_url
@@ -245,6 +255,7 @@ def identify_badge():
             continue
         logger.info("Comparing with DB ID %s → Hash dist: %s", row[0], dist)
         color_score = 0
+        # color_hist stays at index 7 since url is appended after it
         color_hist_str = row[7]
         if color_hist_str:
             db_hist = json.loads(color_hist_str)
@@ -263,6 +274,7 @@ def identify_badge():
         logger.info("✅ Match found: ID=%s | score=%s", best_match[0], best_score)
         conn.close()
         logger.debug("Total identify_badge time %.2fs (from start)", time.time()-request_start)  
+        # Return the URL stored in DB (index 8)
         db_url = best_match[8] if len(best_match) > 8 else None
         return jsonify(
             {
@@ -280,78 +292,70 @@ def identify_badge():
     grok_result, grok_raw, grok_preview = call_grok_api(resized_bytes)
     logger.debug("Grok parsed result: %s", grok_result)
     if grok_result:
-        # If Grok returned a result, extract fields and insert into badges
-        source_work = grok_result.get("source_work", "[unknown]")
-        character = grok_result.get("character", "[unknown]")
-        acquisition_difficulty = grok_result.get("acquisition_difficulty", "[unknown]")
-        auction_description = grok_result.get("auction_description", "[unknown]")
-        logger.info("Inserting Grok result into DB for hash %s.", image_hash)
+        source_work = grok_result.get("source_work", "")
+        character = grok_result.get("character", "")
+        acquisition_difficulty = grok_result.get("acquisition_difficulty", "")
+        auction_description = grok_result.get("auction_description", "")
+    else:
+        source_work = ""
+        character = ""
+        acquisition_difficulty = ""
+        auction_description = ""
+        # Construct an error detail using the preview JSON if available. If not, fall back to raw content.
+        if grok_preview:
+            error_detail = f"Grok full JSON preview={grok_preview}"
+        elif grok_raw:
+            error_detail = f"length={len(grok_raw)} content={grok_raw[:200]}"
+        else:
+            error_detail = "No valid Grok response"
         try:
             cur.execute(
-                """
-                INSERT INTO badges (
-                    image_hash, source_work, character,
-                    acquisition_difficulty, auction_description, color_hist, url
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (image_hash) DO UPDATE SET
-                    source_work         = EXCLUDED.source_work,
-                    character           = EXCLUDED.character,
-                    acquisition_difficulty     = EXCLUDED.acquisition_difficulty,
-                    auction_description = EXCLUDED.auction_description,
-                    color_hist          = EXCLUDED.color_hist,
-                    url                 = EXCLUDED.url
-                """,
-                (
-                    image_hash,
-                    source_work,
-                    character,
-                    acquisition_difficulty,
-                    auction_description,
-                    json.dumps(input_hist),
-                    url_uploaded,
-                ),
+                "INSERT INTO failed_grok (image_hash, url, error_detail) VALUES (%s, %s, %s)",
+                (image_hash, url_uploaded, error_detail),
             )
             conn.commit()
         except Exception as e:
-            logger.error("Failed to insert Grok result for hash %s: %s", image_hash, e)
+            logger.error("Failed to insert failed_grok record for hash %s: %s", image_hash, e)
             conn.rollback()
-        conn.close()
-        logger.debug("Total identify_badge time %.2fs (from start)", time.time()-request_start)
-        return jsonify(
-            {
-                "image_hash": image_hash,
-                "source_work": source_work,
-                "character": character,
-                "acquisition_difficulty": acquisition_difficulty,
-                "auction_description": auction_description,
-                "matched": False,
-                "url": url_uploaded,
-            }
-        )
-    # Grok did not return a valid result → insert into failed_grok and request feedback
-    logger.warning("Grok API did not return a valid result. Storing image_hash, url and error detail in failed_grok.")
-    if grok_preview:
-        error_detail = f"preview={grok_preview}"
-    elif grok_raw:
-        error_detail = f"length={len(grok_raw)} content={grok_raw[:200]}"
-    else:
-        error_detail = "No valid Grok response"
     try:
         cur.execute(
-            "INSERT INTO failed_grok (image_hash, url, error_detail) VALUES (%s, %s, %s)",
-            (image_hash, url_uploaded, error_detail),
+            """
+            INSERT INTO badges (
+                image_hash, source_work, character,
+                acquisition_difficulty, auction_description, color_hist, url
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (image_hash) DO UPDATE SET
+                source_work         = COALESCE(NULLIF(EXCLUDED.source_work, ''), badges.source_work),
+                character           = COALESCE(NULLIF(EXCLUDED.character, ''), badges.character),
+                acquisition_difficulty = COALESCE(NULLIF(EXCLUDED.acquisition_difficulty, ''), badges.acquisition_difficulty),
+                auction_description = COALESCE(NULLIF(EXCLUDED.auction_description, ''), badges.auction_description),
+                color_hist          = EXCLUDED.color_hist,
+                url                 = EXCLUDED.url
+            """,
+            (
+                image_hash,
+                source_work,
+                character,
+                acquisition_difficulty,
+                auction_description,
+                json.dumps(input_hist),
+                url_uploaded,
+            ),
         )
         conn.commit()
     except Exception as e:
-        logger.error("Failed to insert failed_grok record for hash %s: %s", image_hash, e)
+        logger.error("Failed to insert badge for hash %s: %s", image_hash, e)
         conn.rollback()
     conn.close()
-    logger.debug("Total identify_badge time %.2fs (from start)", time.time()-request_start)  
+    logger.debug("Total identify_badge time %.2fs (from start)", time.time()-request_start)
     return jsonify(
         {
             "image_hash": image_hash,
-            "color_hist": input_hist,
+            "source_work": source_work,
+            "character": character,
+            "acquisition_difficulty": acquisition_difficulty,
+            "auction_description": auction_description,
             "matched": False,
             "url": url_uploaded,
         }
@@ -363,14 +367,6 @@ def identify_badge():
 @app.route("/feedback", methods=["POST"])
 def feedback():
     """Accept user feedback to insert a new badge entry into the database.
-
-    When the identify_badge endpoint does not find a match, the front‑end will
-    prompt the user to enter information about the badge. This endpoint
-    receives that data and writes it to the database. All fields are optional
-    except the image_hash and color_hist, which are required to uniquely
-    identify the badge and store its color histogram.
-
-    Returns a JSON response indicating success or error.
     """
     image_hash = request.form.get("image_hash")
     color_hist_str = request.form.get("color_hist")
