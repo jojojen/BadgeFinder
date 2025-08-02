@@ -139,27 +139,6 @@ def call_grok_api(image_bytes):
         # First attempt with configured timeout
         response = requests.post(GROK_API_URL, json=payload, headers=headers, timeout=GROK_API_TIMEOUT)
         logger.debug("Grok HTTP status: %s | time %.2fs", response.status_code, time.time() - start_grok)
-    except Timeout:
-        # If the first request times out, log a warning and retry once with a longer timeout
-        logger.warning(
-            "Grok API timeout after %s seconds, retrying once with %s seconds", GROK_API_TIMEOUT, GROK_API_TIMEOUT * 2
-        )
-        try:
-            response = requests.post(
-                GROK_API_URL,
-                json=payload,
-                headers=headers,
-                timeout=GROK_API_TIMEOUT * 2,
-            )
-            logger.debug(
-                "Grok retry HTTP status: %s | time %.2fs", response.status_code, time.time() - start_grok
-            )
-        except Exception as retry_exc:
-            # If the retry also fails, return (None, None)
-            logger.error(
-                "Grok API retry failed after %.2fs: %s", time.time() - start_grok, retry_exc
-            )
-            return None, None
     except Exception as e:
         # For other exceptions (e.g., network errors), return (None, None)
         logger.error("Grok API request failed after %.2fs: %s", time.time() - start_grok, e)
@@ -179,7 +158,6 @@ def call_grok_api(image_bytes):
             logger.error("Failed to parse Grok API content as JSON (%.2fs)", time.time() - start_grok)
             return None, content
     except Exception as e:
-        # Catch JSON parsing or status errors
         logger.error("Grok API response processing failed after %.2fs: %s", time.time() - start_grok, e)
         return None, None
 
