@@ -368,42 +368,28 @@ def feedback():
     """Accept user feedback to insert a new badge entry into the database.
     """
     image_hash = request.form.get("image_hash")
-    color_hist_str = request.form.get("color_hist")
-    if not image_hash or not color_hist_str:
-        return jsonify({"error": "Missing image_hash or color_hist"}), 400
     source_work = request.form.get("source_work", "[unknown]")
     character = request.form.get("character", "[unknown]")
-    acquisition_difficulty = request.form.get("acquisition_difficulty", "[unknown]")
     auction_description = request.form.get("auction_description", "[unknown]")
-    url_form = request.form.get("url")
-    # Insert or update the badge entry using user feedback
+    # update the badge entry using user feedback
     conn = get_conn()
     cur = conn.cursor()
     try:
         cur.execute(
-            """
-            INSERT INTO badges (
-                image_hash, source_work, character,
-                acquisition_difficulty, auction_description, color_hist, url
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (image_hash) DO UPDATE SET
-                source_work         = EXCLUDED.source_work,
-                character           = EXCLUDED.character,
-                auction_description = EXCLUDED.auction_description,
-                color_hist          = EXCLUDED.color_hist,
-                url                 = COALESCE(EXCLUDED.url, badges.url)
-            """,
-            (
-                image_hash,
-                source_work,
-                character,
-                acquisition_difficulty,
-                auction_description,
-                color_hist_str,
-                url_form,
-            ),
-        )
+        """
+        UPDATE badges SET
+            source_work = %s,
+            character = %s,
+            auction_description = %s
+        WHERE image_hash = %s
+        """,
+        (
+            source_work,
+            character,
+            auction_description,
+            image_hash
+        ),
+    )
         conn.commit()
     except Exception as e:
         logger.error("Failed to insert feedback for hash %s: %s", image_hash, e)
