@@ -255,8 +255,7 @@ def identify_badge():
             continue
         logger.info("Comparing with DB ID %s → Hash dist: %s", row[0], dist)
         color_score = 0
-        # color_hist stays at index 7 since url is appended after it
-        color_hist_str = row[7]
+        color_hist_str = row[6]
         if color_hist_str:
             db_hist = json.loads(color_hist_str)
             color_score = compare_hist(input_hist, db_hist)
