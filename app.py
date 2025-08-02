@@ -77,6 +77,19 @@ def init_db():
         );
         """
     )
+    # Ensure new columns exist on existing tables
+    try:
+        cur.execute("ALTER TABLE badges ADD COLUMN IF NOT EXISTS url TEXT;")
+    except Exception:
+        pass
+    try:
+        cur.execute("ALTER TABLE failed_grok ADD COLUMN IF NOT EXISTS url TEXT;")
+    except Exception:
+        pass
+    try:
+        cur.execute("ALTER TABLE failed_grok ADD COLUMN IF NOT EXISTS error_detail TEXT;")
+    except Exception:
+        pass
     conn.commit()
     conn.close()
     logger.info("Database initialized.")
@@ -147,19 +160,21 @@ def call_grok_api(image_bytes):
         response.raise_for_status()
         result = response.json()
         logger.info("Grok API response JSON parsed in %.2fs", time.time() - start_grok)
-        content = result["choices"][0]["message"]["content"]
-        logger.debug("Grok full JSON preview=%s…", json.dumps(result)[:400])
+        # Serialize the entire response for preview/debug purposes. Limit size to avoid huge strings.
+        preview = json.dumps(result)[:400]
+        logger.debug("Grok full JSON preview=%s…", preview)
+        content = result["choices"][0]["message"].get("content", "")
         logger.debug("Grok raw content: %s", content)
         try:
             parsed_result = json.loads(content)
             logger.info("Parsed Grok JSON successfully (%.2fs)", time.time() - start_grok)
-            return parsed_result, content
+            return parsed_result, content, preview
         except json.JSONDecodeError:
             logger.error("Failed to parse Grok API content as JSON (%.2fs)", time.time() - start_grok)
-            return None, content
+            return None, content, preview
     except Exception as e:
         logger.error("Grok API response processing failed after %.2fs: %s", time.time() - start_grok, e)
-        return None, None
+        return None, None, None
 
 # ------------------------------------------------------------------
 # Flask routes
@@ -262,7 +277,7 @@ def identify_badge():
         )
     # Not found → calling Grok API; if Grok fails, record error details and stored image
     logger.info("❌ No match found → calling Grok API for image hash: %s", image_hash)
-    grok_result, grok_raw = call_grok_api(resized_bytes)
+    grok_result, grok_raw, grok_preview = call_grok_api(resized_bytes)
     logger.debug("Grok parsed result: %s", grok_result)
     if grok_result:
         # If Grok returned a result, extract fields and insert into badges
@@ -316,7 +331,9 @@ def identify_badge():
         )
     # Grok did not return a valid result → insert into failed_grok and request feedback
     logger.warning("Grok API did not return a valid result. Storing image_hash, url and error detail in failed_grok.")
-    if grok_raw:
+    if grok_preview:
+        error_detail = f"preview={grok_preview}"
+    elif grok_raw:
         error_detail = f"length={len(grok_raw)} content={grok_raw[:200]}"
     else:
         error_detail = "No valid Grok response"
