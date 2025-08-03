@@ -28,7 +28,7 @@
         <!-- Result area -->
         <div id="result"></div>
 
-        <!-- Feedback form (shown only when Grok fails) -->
+        <!-- Feedback form (shown only when metadata is missing or Grok fails) -->
         <div id="feedbackForm" style="display: none; margin-top: 1rem;">
             <h2>情報提供のお願い</h2>
             <input type="hidden" id="feedbackHash">
@@ -163,14 +163,29 @@
 
                 /* ----- Render identification result ----- */
                 if (idData.matched) {
-                    const fields = [
-                        ['一致状況',    '✅ データベースに存在します'],
-                        ['出典作品',    idData.source_work],
-                        ['キャラクター', idData.character],
-                        ['入手難度',    idData.acquisition_difficulty],
-                        ['アイテム解説', idData.auction_description]
-                    ];
-                    renderFields(fields);
+                    // Check if database record exists but metadata fields are empty.
+                    const metaMissing =
+                        (!idData.source_work || idData.source_work.trim() === '') &&
+                        (!idData.character || idData.character.trim() === '') &&
+                        (!idData.acquisition_difficulty || idData.acquisition_difficulty.trim() === '') &&
+                        (!idData.auction_description || idData.auction_description.trim() === '');
+                    if (metaMissing) {
+                        // Ask user to provide missing information to update the record
+                        resultDiv.innerHTML = '<p>このバッジは以前登録されていますが、詳細な情報がありません。ぜひ情報を入力して更新にご協力ください。</p>';
+                        // Store hash & histogram for feedback
+                        feedbackHash.value = idData.image_hash;
+                        feedbackHist.value = JSON.stringify(idData.color_hist);
+                        feedbackForm.style.display = 'block';
+                    } else {
+                        const fields = [
+                            ['一致状況',    '✅ データベースに存在します'],
+                            ['出典作品',    idData.source_work],
+                            ['キャラクター', idData.character],
+                            ['入手難度',    idData.acquisition_difficulty],
+                            ['アイテム解説', idData.auction_description]
+                        ];
+                        renderFields(fields);
+                    }
                 } else {
                     if (idData.source_work && idData.source_work.trim() !== '') {
                         // Grok succeeded → first discovery
@@ -184,7 +199,8 @@
                         renderFields(fields);
                     } else {
                         // Grok failed → ask for feedback
-                        resultDiv.innerHTML = '<p>うーん、このバッジはちょっと珍しいようです。もしかしたら本当にレア物か、またはAIが休憩中かもしれません。別の画像を試してみてください</p>';
+                        resultDiv.innerHTML =
+                            '<p>うーん、このバッジはちょっと珍しいようです。もしかしたら本当にレア物か、またはAIが休憩中かもしれません。別の画像を試してみてください</p>';
                         // Store hash & histogram for feedback
                         feedbackHash.value = idData.image_hash;
                         feedbackHist.value = JSON.stringify(idData.color_hist);
@@ -238,7 +254,8 @@
                 const resp = await fetch('/feedback', { method: 'POST', body: formData });
                 const data = await resp.json();
                 if (data.status === 'success') {
-                    resultDiv.innerHTML = '<p>ご協力ありがとうございます！提供いただいた情報を登録しました。</p>';
+                    resultDiv.innerHTML =
+                        '<p>ご協力ありがとうございます！提供いただいた情報を登録しました。</p>';
                     feedbackForm.style.display = 'none';
                 } else {
                     resultDiv.innerHTML = '<p style="color:red;">送信に失敗しました。もう一度お試しください。</p>';
